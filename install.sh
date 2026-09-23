@@ -14,10 +14,11 @@ hint() { echo -e "${yellow}$*${reset}"; }
 
 show_notice() {
     local message="$1"
-    local terminal_width=$(tput cols)
-    local line=$(printf "%*s" "$terminal_width" | tr ' ' '*')
-    local padding=$(( (terminal_width - ${#message}) / 2 ))
-    local padded_message="$(printf "%*s%s" $padding '' "$message")"
+    local terminal_width line padding padded_message
+    terminal_width="$(tput cols)"
+    line="$(printf "%*s" "$terminal_width" | tr ' ' '*')"
+    padding=$(( (terminal_width - ${#message}) / 2 ))
+    padded_message="$(printf "%*s%s" "$padding" '' "$message")"
     warning "${bold}${line}${reset}"
     echo ""
     warning "${bold}${padded_message}${reset}"
