@@ -697,7 +697,7 @@ validate_client_name() { # validate_client_name <name> -> rc 0 if allowed
     return 0
 }
 
-# Seconds to wait for the exclusive config lock before aborting. Web/E3 helpers
+# Seconds to wait for the exclusive config lock before aborting. Other helpers
 # MUST run with a finite timeout; the CLI default stays generous.
 SB_LOCK_TIMEOUT="${SB_LOCK_TIMEOUT:-15}"
 
