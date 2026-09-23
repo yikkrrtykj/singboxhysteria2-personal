@@ -98,7 +98,7 @@ install_pkgs() {
 install_shortcut() {
   cat > /root/sbox/mianyang.sh << EOF
 #!/usr/bin/env bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install.sh) \$1
+bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh) \$1
 EOF
   chmod +x /root/sbox/mianyang.sh
   ln -sf /root/sbox/mianyang.sh /usr/bin/mianyang
@@ -653,7 +653,7 @@ EOF
     printf "umask 077 && printf '%%s' '%s' | base64 -d > /tmp/mihomo_client.yaml && chmod 600 /tmp/mihomo_client.yaml\n" "$mihomo_config_base64"
     echo ""
     info "命令 2：下载 Linux 网关安装器"
-    echo "curl -fsSL -o /tmp/install-linux-gateway.sh https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
+    echo "curl -fsSL -o /tmp/install-linux-gateway.sh https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
     echo ""
     info "命令 3：安装 Mihomo、启用 TUN 网关并开放局域网 9090 UI"
     # Keep command substitution literal so it runs on the Linux client.
@@ -697,8 +697,8 @@ validate_client_name() { # validate_client_name <name> -> rc 0 if allowed
     return 0
 }
 
-# Seconds to wait for the exclusive config lock before aborting. Web/E3 helpers
-# MUST run with a finite timeout; the CLI default stays generous.
+# Seconds to wait for the exclusive config lock before aborting. Management helpers
+# use a finite timeout; the CLI default stays generous.
 SB_LOCK_TIMEOUT="${SB_LOCK_TIMEOUT:-15}"
 
 # Runs "$@" while holding the exclusive config lock (fd 9), so two management

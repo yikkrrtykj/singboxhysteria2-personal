@@ -1,0 +1,39 @@
+name: personal-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  phase-cd:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck util-linux
+      - name: Shell syntax
+        run: |
+          bash -n install.sh
+          bash -n install-linux-gateway.sh
+      - name: Phase C regression
+        run: bash tests/test-phase-c.sh
+      - name: Phase D regression
+        run: bash tests/test-phase-d.sh
+      - name: Personal-edition boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -qF 'https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh' README.md
+          grep -qF 'https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh' install.sh
+          grep -qF 'https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install-linux-gateway.sh' install.sh
+          ! grep -R -n -F 'raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/' README.md install.sh install-linux-gateway.sh tests
+          test ! -e monitor-v2
+          test ! -e sbox-cm
+          ! find . -maxdepth 2 -type d \( -name web -o -name monitor-v2 -o -name sbox-cm \) -print -quit | grep -q .
