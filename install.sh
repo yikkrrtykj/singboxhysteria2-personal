@@ -690,7 +690,6 @@ RESERVED_CLIENT_NAME="legacy"
 CLIENT_NAME_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$'
 REALITY_INBOUND_TAG="vless-in"
 HY2_INBOUND_TAG="hy2-in"
-REALITY_FLOW="xtls-rprx-vision"
 
 validate_client_name() { # validate_client_name <name> -> rc 0 if allowed
     local name="$1"
