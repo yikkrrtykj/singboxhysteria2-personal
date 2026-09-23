@@ -16,7 +16,8 @@ show_notice() {
     local message="$1"
     local terminal_width line padding padded_message
     terminal_width="$(tput cols)"
-    line="$(printf "%*s" "$terminal_width" | tr ' ' '*')"
+    line="$(printf '%*s' "$terminal_width" '')"
+    line="${line// /*}"
     padding=$(( (terminal_width - ${#message}) / 2 ))
     padded_message="$(printf "%*s%s" "$padding" '' "$message")"
     warning "${bold}${line}${reset}"
