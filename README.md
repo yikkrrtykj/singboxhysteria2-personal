@@ -1,9 +1,11 @@
-# Reality + Hysteria2 二合一 sing-box
+# Reality + Hysteria2 二合一 sing-box — Personal
+
+个人用户使用的纯脚本版本：保留 Reality + Hysteria2、多客户端管理、Mihomo/Linux 网关与 sing-box 1.14.x 升级能力；**不包含服务端 Monitor、Dashboard、E3 或 Web 管理后台**。
 
 ## 1. 安装服务端
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh)
 ```
 
 作用：安装 Reality + Hysteria2 服务端、systemd 服务和 `mianyang` 管理命令。全新安装会自动启用并启动 `sing-box.service`，不使用手工进程。
@@ -121,7 +123,7 @@ mianyang
 
 1. 写入 `/tmp/mihomo_client.yaml`；
 2. 下载 `install-linux-gateway.sh`；
-3. 安装 Mihomo、启用 TUN 网关并开放局域网 9090 UI。
+3. 安装 Mihomo、启用 TUN 网关并可开放局域网 9090 MetaCubeXD UI。
 
 支持：Ubuntu 22.04/24.04、Debian 12、amd64/arm64、systemd、`/dev/net/tun`。
 
@@ -133,7 +135,7 @@ mianyang
 cat /etc/mihomo/ui-secret
 ```
 
-作用：查看 9090 Web UI 密钥。
+作用：查看 Linux Mihomo 网关的 9090 MetaCubeXD UI 密钥（不是服务端 Web 管理后台）。
 
 ```text
 http://<Linux网关IP>:9090/ui/
