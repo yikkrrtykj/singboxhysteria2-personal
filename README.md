@@ -1,9 +1,11 @@
 # Reality + Hysteria2 二合一 sing-box
 
+> Personal edition：面向个人使用，保留脚本式管理与 Phase C/D 能力，不包含 Monitor/Web/E3 管理栈。
+
 ## 1. 安装服务端
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh)
 ```
 
 作用：安装 Reality + Hysteria2 服务端、systemd 服务和 `mianyang` 管理命令。全新安装会自动启用并启动 `sing-box.service`，不使用手工进程。
