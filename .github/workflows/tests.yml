@@ -18,3 +18,5 @@ jobs:
         run: bash tests/test-phase-c.sh
       - name: Phase D regression
         run: bash tests/test-phase-d.sh
+      - name: Maintenance menu regression
+        run: bash tests/test-maintenance.sh

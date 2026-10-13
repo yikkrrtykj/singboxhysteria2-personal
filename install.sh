@@ -7,6 +7,10 @@ yellow="\033[33m\033[01m"
 reset="\033[0m"
 bold="\e[1m"
 
+PERSONAL_REPO_RAW_URL="https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main"
+SB_SHORTCUT_FILE="${SB_SHORTCUT_FILE:-/root/sbox/mianyang.sh}"
+SB_SHORTCUT_LINK="${SB_SHORTCUT_LINK:-/usr/bin/mianyang}"
+
 warning() { echo -e "${red}$*${reset}"; }
 error() { warning "$*" && exit 1; }
 info() { echo -e "${green}$*${reset}"; }
@@ -76,34 +80,64 @@ show_status(){
 }
 
 install_pkgs() {
-  # Install qrencode, jq, and iptables if not already installed
-  local pkgs=("qrencode" "jq" "iptables")
-  for pkg in "${pkgs[@]}"; do
-    if command -v "$pkg" &> /dev/null; then
-      hint "$pkg 已经安装"
-    else
-      hint "开始安装 $pkg..."
-      if command -v apt &> /dev/null; then
-        sudo apt update > /dev/null 2>&1 && sudo apt install -y "$pkg" > /dev/null 2>&1
-      elif command -v yum &> /dev/null; then
-        sudo yum install -y "$pkg"
-      elif command -v dnf &> /dev/null; then
-        sudo dnf install -y "$pkg"
-      else
-        error "Unable to install $pkg. Please install it manually and rerun the script."
-      fi
-      hint "$pkg 安装成功"
-    fi
+  local manager spec executable package
+  local ip_package="iproute2" ps_package="procps"
+  local -a missing=()
+  if [ "$(id -u)" -ne 0 ]; then
+    error "请以 root 运行安装脚本。"
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    manager="apt-get"
+  elif command -v dnf >/dev/null 2>&1; then
+    manager="dnf"; ip_package="iproute"; ps_package="procps-ng"
+  elif command -v yum >/dev/null 2>&1; then
+    manager="yum"; ip_package="iproute"; ps_package="procps-ng"
+  else
+    error "未找到支持的软件包管理器。"
+    return 1
+  fi
+  local -a dependencies=(
+    "qrencode:qrencode" "jq:jq" "iptables:iptables" "curl:curl"
+    "openssl:openssl" "ss:$ip_package" "flock:util-linux"
+    "pgrep:$ps_package" "sysctl:$ps_package" "tar:tar" "sha256sum:coreutils"
+  )
+  for spec in "${dependencies[@]}"; do
+    executable=${spec%%:*}; package=${spec#*:}
+    command -v "$executable" >/dev/null 2>&1 || missing+=("$package")
   done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    hint "开始安装缺少的基础依赖..."
+    if [ "$manager" = "apt-get" ]; then
+      apt-get update || { error "更新软件包索引失败，安装已停止。"; return 1; }
+    fi
+    "$manager" install -y ca-certificates "${missing[@]}" || {
+      error "安装基础依赖失败，安装已停止。"
+      return 1
+    }
+  fi
+  for spec in "${dependencies[@]}"; do
+    executable=${spec%%:*}
+    command -v "$executable" >/dev/null 2>&1 || {
+      error "依赖 $executable 仍不可用，安装已停止。"
+      return 1
+    }
+  done
+  hint "基础依赖检查通过"
 }
 
 install_shortcut() {
-  cat > /root/sbox/mianyang.sh << EOF
+  mkdir -p "$(dirname "$SB_SHORTCUT_FILE")" || return 1
+  cat > "$SB_SHORTCUT_FILE" << EOF || return 1
 #!/usr/bin/env bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install.sh) \$1
+set -e
+task_script=\$(mktemp)
+trap 'rm -f -- "\$task_script"' EXIT
+curl -fsSL --connect-timeout 15 --max-time 120 -o "\$task_script" "${PERSONAL_REPO_RAW_URL}/install.sh"
+bash "\$task_script" "\$@"
 EOF
-  chmod +x /root/sbox/mianyang.sh
-  ln -sf /root/sbox/mianyang.sh /usr/bin/mianyang
+  chmod 0755 "$SB_SHORTCUT_FILE" || return 1
+  ln -sf "$SB_SHORTCUT_FILE" "$SB_SHORTCUT_LINK"
 }
 
 reload_singbox() {
@@ -195,30 +229,64 @@ restart_singbox() {
     systemctl start sing-box
 }
 
+validate_port() {
+    [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+}
+
+port_in_use() {
+    local listeners
+    listeners="$(ss -H -lntu 2>/dev/null)" || {
+        warning "无法检查监听端口，操作已停止。" >&2
+        return 2
+    }
+    printf '%s\n' "$listeners" | grep -qE "[:.]${1}[[:space:]]"
+}
+
 generate_port() {
-   local protocol="$1"
+    local protocol="$1" port user_input status
     while :; do
         port=$((RANDOM % 10001 + 10000))
-        read -p "请为 ${protocol} 输入监听端口(默认为随机生成): " user_input
+        read -r -p "请为 ${protocol} 输入监听端口(默认为随机生成): " user_input || return 1
         port=${user_input:-$port}
-        ss -tuln | grep -q ":$port\b" || { echo "$port"; return 0; }
-        echo "端口 $port 被占用，请输入其他端口"
+        if ! validate_port "$port"; then
+            warning "端口必须是 1～65535 的整数。" >&2
+            continue
+        fi
+        port=$((10#$port))
+        if port_in_use "$port"; then
+            warning "端口 $port 被占用，请输入其他端口。" >&2
+        else
+            status=$?
+            [ "$status" -eq 1 ] || return 1
+            printf '%s\n' "$port"
+            return 0
+        fi
     done
 }
 
 modify_port() {
-    local current_port="$1"
-    local protocol="$2"
+    local current_port="$1" protocol="$2" modified_port status
     while :; do
-        read -p "请输入需要修改的 ${protocol} 端口，回车不修改 (当前 ${protocol} 端口为: $current_port): " modified_port
+        read -r -p "请输入需要修改的 ${protocol} 端口，回车不修改 (当前 ${protocol} 端口为: $current_port): " modified_port || return 1
         modified_port=${modified_port:-$current_port}
-        if [ "$modified_port" -eq "$current_port" ] || ! ss -tuln | grep -q ":$modified_port\b"; then
-            break
+        if ! validate_port "$modified_port"; then
+            warning "端口必须是 1～65535 的整数。" >&2
+            continue
+        fi
+        modified_port=$((10#$modified_port))
+        if [ "$modified_port" -eq "$current_port" ]; then
+            printf '%s\n' "$modified_port"
+            return 0
+        fi
+        if port_in_use "$modified_port"; then
+            warning "端口 $modified_port 被占用，请输入其他端口。" >&2
         else
-            echo "端口 $modified_port 被占用，请输入其他端口"
+            status=$?
+            [ "$status" -eq 1 ] || return 1
+            printf '%s\n' "$modified_port"
+            return 0
         fi
     done
-    echo "$modified_port"
 }
 
 # client configuration
@@ -650,7 +718,7 @@ EOF
     printf "umask 077 && printf '%%s' '%s' | base64 -d > /tmp/mihomo_client.yaml && chmod 600 /tmp/mihomo_client.yaml\n" "$mihomo_config_base64"
     echo ""
     info "命令 2：下载 Linux 网关安装器"
-    echo "curl -fsSL -o /tmp/install-linux-gateway.sh https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
+    echo "curl -fsSL -o /tmp/install-linux-gateway.sh ${PERSONAL_REPO_RAW_URL}/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
     echo ""
     info "命令 3：安装 Mihomo、启用 TUN 网关并开放局域网 9090 UI"
     # Keep command substitution literal so it runs on the Linux client.
@@ -2032,19 +2100,222 @@ enable_bbr() {
     fi
 }
 
+# >>> maintenance-config >>> ==================================================
+# Ordinary menu edits preserve existing identities, including unnamed legacy
+# accounts. They use the same lock as client management and upgrades.
+validate_server_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*$ ]]
+}
+
+check_reality_target() {
+    local headers
+    validate_server_name "$1" || return 1
+    headers=$(curl --noproxy '*' --proto '=https' --connect-timeout 5 --max-time 15 \
+        --tlsv1.3 --tls-max 1.3 --http2 -fsSI "https://$1") || return 1
+    grep -q 'HTTP/2' <<< "$headers"
+}
+
+validate_ipv4_address() {
+    local octet
+    local -a octets
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a octets <<< "$1"
+    for octet in "${octets[@]}"; do
+        [[ "$octet" = 0 || "$octet" != 0* ]] || return 1
+        (( 10#$octet <= 255 )) || return 1
+    done
+}
+
+maintenance_runtime_ok() {
+    local was_running="$1" tcp udp listeners kind port network
+    if [ "$was_running" = systemd ]; then
+        systemctl is-active --quiet sing-box 2>/dev/null || return 1
+    else
+        pgrep -x sing-box >/dev/null 2>&1 || return 1
+    fi
+    tcp="$(ss -H -lnt 2>/dev/null)" || return 1
+    udp="$(ss -H -lnu 2>/dev/null)" || return 1
+    listeners="$(jq -r '
+        .inbounds[] | select(.listen_port != null and
+          (.type == "vless" or .type == "hysteria2" or
+           .type == "direct" or .type == "shadowsocks")) |
+        [.type, .listen_port, (.network // "")] | @tsv
+      ' "$SB_SERVER_CONFIG")" || return 1
+    while IFS=$'\t' read -r kind port network; do
+        [ -n "$kind" ] || continue
+        case "$kind" in
+            vless) network=tcp ;;
+            hysteria2) network=udp ;;
+        esac
+        if [ "$network" != udp ]; then
+            grep -qE "[:.]${port}[[:space:]]" <<< "$tcp" || return 1
+        fi
+        if [ "$network" != tcp ]; then
+            grep -qE "[:.]${port}[[:space:]]" <<< "$udp" || return 1
+        fi
+    done <<< "$listeners"
+}
+
+wait_maintenance_runtime() {
+    local attempt
+    # Reload sends SIGHUP asynchronously; allow the listener replacement to run.
+    sleep 1
+    for attempt in {1..10}; do
+        maintenance_runtime_ok "$1" && return 0
+        sleep 1
+    done
+    return 1
+}
+
+restore_maintenance_config() {
+    local backup="$1" state_backup="$2" was_running="$3"
+    if ! cp -a "$backup" "$SB_SERVER_CONFIG"; then
+        warning "恢复配置失败，请使用备份人工恢复: $backup"
+        return 1
+    fi
+    if [ -n "$state_backup" ] && ! cp -a "$state_backup" "$SB_STATE_FILE"; then
+        warning "恢复节点信息失败，请使用备份人工恢复: $state_backup"
+        return 1
+    fi
+    if [ "$was_running" != no ]; then
+        if [ "$was_running" = systemd ] && ! systemctl is-active --quiet sing-box; then
+            systemctl restart sing-box || return 1
+        else
+            reload_running_singbox || return 1
+        fi
+        if ! wait_maintenance_runtime "$was_running" ||
+           ! ensure_hy2_hopping_after_restart; then
+            warning "文件已恢复，但服务未能确认恢复，请人工检查。备份: $backup $state_backup"
+            return 1
+        fi
+    fi
+    warning "已恢复修改前的配置。"
+}
+
+commit_maintenance_config() {
+    local candidate="$1" description="$2" state_candidate="${3:-}"
+    local backup state_backup="" was_running=no
+    if ! "$SB_SING_BOX_BIN" check -c "$candidate"; then
+        warning "配置检查未通过，正式配置未修改。"
+        rm -f -- "$candidate" ${state_candidate:+"$state_candidate"}
+        return 1
+    fi
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        was_running=systemd
+    elif pgrep -x sing-box >/dev/null 2>&1; then
+        was_running=manual
+    fi
+    backup="$(new_backup_path)" || {
+        rm -f -- "$candidate" ${state_candidate:+"$state_candidate"}; return 1;
+    }
+    if ! cp -a "$SB_SERVER_CONFIG" "$backup" ||
+       ! chmod --reference="$SB_SERVER_CONFIG" "$candidate"; then
+        warning "备份或准备配置失败，正式配置未修改。"
+        rm -f -- "$candidate" ${state_candidate:+"$state_candidate"}
+        return 1
+    fi
+    if [ -n "$state_candidate" ]; then
+        state_backup="$(mktemp "${SB_STATE_FILE}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")" || {
+            rm -f -- "$candidate" "$state_candidate"; return 1;
+        }
+        if ! cp -a "$SB_STATE_FILE" "$state_backup" ||
+           ! chmod --reference="$SB_STATE_FILE" "$state_candidate"; then
+            warning "备份节点信息失败，正式配置未修改。"
+            rm -f -- "$candidate" "$state_candidate"
+            return 1
+        fi
+    fi
+    if ! mv -f -- "$candidate" "$SB_SERVER_CONFIG"; then
+        rm -f -- "$candidate" ${state_candidate:+"$state_candidate"}
+        return 1
+    fi
+    if [ -n "$state_candidate" ] && ! mv -f -- "$state_candidate" "$SB_STATE_FILE"; then
+        restore_maintenance_config "$backup" "$state_backup" no
+        rm -f -- "$state_candidate"
+        return 1
+    fi
+    if [ "$was_running" != no ]; then
+        if ! reload_running_singbox || ! wait_maintenance_runtime "$was_running" ||
+           ! ensure_hy2_hopping_after_restart; then
+            warning "重新加载或监听检查失败，正在恢复修改前配置。"
+            restore_maintenance_config "$backup" "$state_backup" "$was_running"
+            return 1
+        fi
+    fi
+    info "配置修改成功: $description"
+    info "配置备份: $backup"
+    [ -z "$state_backup" ] || info "节点信息备份: $state_backup"
+    return 0
+}
+
+apply_server_change() {
+    with_client_lock _apply_server_change_locked "$@"
+}
+
+_apply_server_change_locked() {
+    local description="$1" filter="$2" hy_name="$3"
+    local candidate state_candidate=""
+    shift 3
+    candidate="$(new_candidate_path)" || return 1
+    if ! jq "$@" "$filter" "$SB_SERVER_CONFIG" > "$candidate"; then
+        warning "生成配置失败，正式配置未修改。"
+        rm -f -- "$candidate"
+        return 1
+    fi
+    if [ -n "$hy_name" ]; then
+        if ! validate_server_name "$hy_name" || [ ! -f "$SB_STATE_FILE" ]; then
+            warning "证书域名或节点信息文件无效，正式配置未修改。"
+            rm -f -- "$candidate"
+            return 1
+        fi
+        state_candidate="$(mktemp "${SB_STATE_FILE}.candidate.XXXXXX")" || {
+            rm -f -- "$candidate"; return 1;
+        }
+        if ! awk -v replacement="HY_SERVER_NAME='$hy_name'" '
+          /^HY_SERVER_NAME=/ {print replacement; found=1; next}
+          {print}
+          END {if (!found) print replacement}
+        ' "$SB_STATE_FILE" > "$state_candidate"; then
+            rm -f -- "$candidate" "$state_candidate"
+            return 1
+        fi
+    fi
+    commit_maintenance_config "$candidate" "$description" "$state_candidate"
+}
+
+delete_forward_rule() {
+    local tag="$1"
+    [[ "$tag" == direct-in* ]] || { warning "只能删除任意门规则。"; return 1; }
+    apply_server_change "删除任意门 $tag" '
+      if any(.inbounds[]; .tag == $tag and .type == "direct") then
+        del(.inbounds[] | select(.tag == $tag)) |
+        del(.outbounds[] | select(.tag == ($tag + "-out"))) |
+        .route.rules |= map(
+          if .inbound == $tag then empty
+          elif (.inbound | type) == "array" then
+            .inbound |= map(select(. != $tag)) | select((.inbound | length) > 0)
+          else . end)
+      else error("没有找到对应的任意门入站") end
+    ' '' --arg tag "$tag"
+}
+# <<< maintenance-config <<< ==================================================
+
 modify_singbox() {
+    local reality_current_port reality_current_server_name reality_port reality_server_name
+    local input_server_name hy_current_port hy_port hy_current_cert hy_current_key
+    local hy_current_domain hy_domain hy_cert hy_key
     echo ""
     warning "开始修改VISION_REALITY 端口号和域名"
     echo ""
-    reality_current_port=$(jq -r '.inbounds[] | select(.tag == "vless-in") | .listen_port' /root/sbox/sbconfig_server.json)
-    reality_port=$(modify_port "$reality_current_port" "VISION_REALITY")
+    reality_current_port=$(jq -r '.inbounds[] | select(.tag == "vless-in") | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    reality_port=$(modify_port "$reality_current_port" "VISION_REALITY") || return 1
     info "生成的端口号为: $reality_port"
-    reality_current_server_name=$(jq -r '.inbounds[] | select(.tag == "vless-in") | .tls.server_name' /root/sbox/sbconfig_server.json)
+    reality_current_server_name=$(jq -r '.inbounds[] | select(.tag == "vless-in") | .tls.server_name' "$SB_SERVER_CONFIG") || return 1
     reality_server_name="$reality_current_server_name"
     while :; do
-        read -p "请输入需要偷取证书的网站，必须支持 TLS 1.3 and HTTP/2 (默认: $reality_server_name): " input_server_name
+        read -r -p "请输入 Reality 握手域名，必须支持 TLS 1.3 and HTTP/2 (默认: $reality_server_name): " input_server_name || return 1
         reality_server_name=${input_server_name:-$reality_server_name}
-        if curl --tlsv1.3 --http2 -sI "https://$reality_server_name" | grep -q "HTTP/2"; then
+        if check_reality_target "$reality_server_name"; then
             break
         else
             warning "域名 $reality_server_name 不支持 TLS 1.3 或 HTTP/2，请重新输入."
@@ -2054,36 +2325,31 @@ modify_singbox() {
     echo ""
     warning "开始修改hysteria2端口号"
     echo ""
-    hy_current_port=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .listen_port' /root/sbox/sbconfig_server.json)
-    hy_port=$(modify_port "$hy_current_port" "HYSTERIA2")
+    hy_current_port=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    hy_port=$(modify_port "$hy_current_port" "HYSTERIA2") || return 1
     info "生成的端口号为: $hy_port"
     info "修改hysteria2应用证书路径"
-    hy_current_cert=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .tls.certificate_path' /root/sbox/sbconfig_server.json)
-    hy_current_key=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .tls.key_path' /root/sbox/sbconfig_server.json)
-    hy_current_domain=$(grep -o "HY_SERVER_NAME='[^']*'" /root/sbox/config | awk -F"'" '{print $2}')
-    read -p "请输入证书域名 (默认: $hy_current_domain): " hy_domain
+    hy_current_cert=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .tls.certificate_path' "$SB_SERVER_CONFIG") || return 1
+    hy_current_key=$(jq -r '.inbounds[] | select(.tag == "hy2-in") | .tls.key_path' "$SB_SERVER_CONFIG") || return 1
+    hy_current_domain=$(grep -o "HY_SERVER_NAME='[^']*'" "$SB_STATE_FILE" | awk -F"'" '{print $2}')
+    read -r -p "请输入证书域名 (默认: $hy_current_domain): " hy_domain || return 1
     hy_domain=${hy_domain:-$hy_current_domain}
-    read -p "请输入证书cert路径 (默认: $hy_current_cert): " hy_cert
+    read -r -p "请输入证书cert路径 (默认: $hy_current_cert): " hy_cert || return 1
     hy_cert=${hy_cert:-$hy_current_cert}
-    read -p "请输入证书key路径 (默认: $hy_current_key): " hy_key
+    read -r -p "请输入证书key路径 (默认: $hy_current_key): " hy_key || return 1
     hy_key=${hy_key:-$hy_current_key}
-    jq --arg reality_port "$reality_port" \
-    --arg hy_port "$hy_port" \
-    --arg reality_server_name "$reality_server_name" \
-    --arg hy_cert "$hy_cert" \
-    --arg hy_key "$hy_key" \
-    '
+    apply_server_change "修改端口和 TLS 配置" '
     (.inbounds[] | select(.tag == "vless-in") | .listen_port) |= ($reality_port | tonumber) |
     (.inbounds[] | select(.tag == "hy2-in") | .listen_port) |= ($hy_port | tonumber) |
     (.inbounds[] | select(.tag == "vless-in") | .tls.server_name) |= $reality_server_name |
     (.inbounds[] | select(.tag == "vless-in") | .tls.reality.handshake.server) |= $reality_server_name |
     (.inbounds[] | select(.tag == "hy2-in") | .tls.certificate_path) |= $hy_cert |
     (.inbounds[] | select(.tag == "hy2-in") | .tls.key_path) |= $hy_key
-    ' /root/sbox/sbconfig_server.json > /root/sbox/sbconfig_server.temp && mv /root/sbox/sbconfig_server.temp /root/sbox/sbconfig_server.json
-    
-    sed -i "s/HY_SERVER_NAME='.*'/HY_SERVER_NAME='$hy_domain'/" /root/sbox/config
-
-    reload_singbox
+    ' "$hy_domain" --arg reality_port "$reality_port" \
+    --arg hy_port "$hy_port" \
+    --arg reality_server_name "$reality_server_name" \
+    --arg hy_cert "$hy_cert" \
+    --arg hy_key "$hy_key"
 }
 
 backup_current_installation() {
@@ -2147,28 +2413,36 @@ generate_random_number() {
     echo $((10000000 + RANDOM % 90000000))
 }
 process_doko() {
+  local choice fport ipaddress tport tag_suffix tag delete_tag
   while :; do
       echo "已配置的任意门转发规则如下:"
-      jq '.inbounds[] | select((.tag // "") | startswith("direct-in")) | "\(.tag): 转发至ip \(.override_address // "未设置"), 转发至端口 \(.override_port // "未设置")"' /root/sbox/sbconfig_server.json
+      jq '.inbounds[] | select((.tag // "") | startswith("direct-in")) | "\(.tag): 转发至ip \(.override_address // "未设置"), 转发至端口 \(.override_port // "未设置")"' "$SB_SERVER_CONFIG" || return 1
       echo ""
       echo "选择操作:"
       echo "1. 添加规则"
       echo "2. 删除规则"
       echo "0. 退出"
-      read -p "请输入选择的操作数字（0-2）: " choice
+      read -r -p "请输入选择的操作数字（0-2）: " choice || return 1
       case $choice in
           1)
-              fport=$(generate_port "本机任意门入站")
+              fport=$(generate_port "本机任意门入站") || return 1
               echo "本机端口为: $fport"
-              read -p "请输入转发至的vps ip: " ipaddress
-              read -p "请输入转发至的vps端口: " tport
+              read -r -p "请输入转发至的vps IP 或域名: " ipaddress || return 1
+              [ -n "$ipaddress" ] || { warning "目标地址不能为空。"; return 1; }
+              while :; do
+                  read -r -p "请输入转发至的vps端口: " tport || return 1
+                  validate_port "$tport" && break
+                  warning "目标端口必须是 1-65535 的整数。"
+              done
+              tport=$((10#$tport))
 
               # Generate an 8-digit random number as tag_suffix
               tag_suffix=$(generate_random_number)
 
               tag="direct-in${tag_suffix}"
 
-              jq --arg ipaddress "$ipaddress" --arg fport "$fport" --arg tport "$tport" --arg tag "$tag" '
+              apply_server_change "添加任意门 $tag" '
+                  if any(.inbounds[]; .tag == $tag) then error("入站标签已存在") else . end |
                   .inbounds += [
                       {
                           "type": "direct",
@@ -2181,21 +2455,18 @@ process_doko() {
                   ] | .route.rules += [
                       {
                           "inbound": $tag,
-                          "outbound": "direct"
+                          "action": "route", "outbound": "direct"
                       }
-                  ]' "/root/sbox/sbconfig_server.json" > /root/sbox/sbconfig_server.temp && mv /root/sbox/sbconfig_server.temp /root/sbox/sbconfig_server.json
-              echo "已添加任意门规则配置 ($tag)"
-              reload_singbox
+                  ]' '' --arg ipaddress "$ipaddress" --arg fport "$fport" --arg tport "$tport" --arg tag "$tag" || return 1
               ;;
           2)
               echo "请输入要删除的任意门规则标签 (例如：direct-in1): "
-              read delete_tag
-              jq 'del(.inbounds[] | select(.tag == $delete_tag)) | del(.outbounds[] | select(.tag == ($delete_tag + "-out"))) | .route.rules = (.route.rules | map(select(.inbound != $delete_tag)))' --arg delete_tag "$delete_tag" "/root/sbox/sbconfig_server.json" > /root/sbox/sbconfig_server.temp && mv /root/sbox/sbconfig_server.temp /root/sbox/sbconfig_server.json
-              echo "已删除任意门规则 ($delete_tag)"
-              reload_singbox
+              read -r delete_tag || return 1
+              delete_forward_rule "$delete_tag" || return 1
               ;;
           0)
               echo "退出"
+              return 0
               ;;
           *)
               echo "无效的选择"
@@ -2204,95 +2475,79 @@ process_doko() {
     done
 }
 process_dokoko() {
+    local tag="direct-in" existing_port existing_ip delete_option fport fip
     warning "任意门落地机设置，目前只支持解锁使用443端口的网站"
-    config_file="/root/sbox/sbconfig_server.json"
-    tag="direct-in"
-    existing_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen_port' "$config_file")
-    existing_ip=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen' "$config_file")
+    existing_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    existing_ip=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen' "$SB_SERVER_CONFIG") || return 1
 
     if [ -n "$existing_port" ] && [ "$existing_port" != "null" ]; then
         echo "已存在的监听为: $existing_ip : $existing_port "
-        read -p "是否删除已存在的配置？ (y/n): " delete_option
+        read -r -p "是否删除已存在的配置？ (y/n): " delete_option || return 1
         if [ "$delete_option" = "y" ]; then
-            jq --arg tag "$tag" 'del(.inbounds[] | select(.tag == $tag)) | del(.outbounds[] | select(.tag == ($tag + "-out"))) | .route.rules = (.route.rules | map(select(.inbound != $tag)))' "$config_file" > "${config_file}.temp" && mv "${config_file}.temp" "$config_file"
-            echo "已删除配置"
-            reload_singbox
+            delete_forward_rule "$tag" || return 1
         else
             echo "未删除配置"
         fi
     else
+        fport=$(generate_port "解锁服务") || return 1
         while true; do
-            read -p "请输入解锁服务监听端口: " fport
-            if [[ -n "$fport" && "$fport" =~ ^[0-9]+$ ]]; then
-                break
-            else
-                warning "端口必须为非空数字，请重新输入."
-            fi
-        done
-        while true; do
-          read -p "请输入被解锁机vps ip: " fip
-          ip_regex="^([0-9]{1,3}\.){3}[0-9]{1,3}$"
-          if [[ $fip =~ $ip_regex ]]; then
+          read -r -p "请输入允许连接的被解锁机 VPS 公网 IPv4: " fip || return 1
+          if validate_ipv4_address "$fip"; then
               break
           else
               warning "输入的IP地址格式不合法"
           fi
         done
-        jq --arg fport "$fport" --arg fip "$fip" '
+        apply_server_change "添加任意门落地机（仅允许 $fip）" '
+            if any(.inbounds[]; .tag == "direct-in") then error("入站标签已存在") else . end |
             .inbounds += [
                 {   
                     "type": "direct",
                     "tag": "direct-in",
-                    "listen": $fip,
+                    "listen": "::",
                     "listen_port": ($fport | tonumber),
                     "override_port": 443
                 }
-            ] | .route.rules += [
-                {
-                    "inbound": "direct-in",
-                    "outbound": "direct"
-                }
-            ]' "$config_file" > "${config_file}.temp" && mv "${config_file}.temp" "$config_file"
-        echo "已添加任意门解锁机配置"
-        reload_singbox
+            ] | .route.rules = ([
+                {"inbound": "direct-in", "source_ip_cidr": ($fip + "/32"), "action": "sniff"},
+                {"inbound": "direct-in", "source_ip_cidr": ($fip + "/32"), "action": "route", "outbound": "direct"},
+                {"inbound": "direct-in", "action": "reject"}
+            ] + (.route.rules // []))
+            ' '' --arg fport "$fport" --arg fip "$fip" || return 1
     fi
 }
 
 process_ssko() {
+    local tag="ss-in" existing_port existing_pwd server_ip delete_option fport sspwd
     warning "开始SS落地机设置"
-    config_file="/root/sbox/sbconfig_server.json"
-    tag="ss-in"
-    existing_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen_port' "$config_file")
-    existing_pwd=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .password' "$config_file")
-    server_ip=$(grep -o "SERVER_IP='[^']*'" /root/sbox/config | awk -F"'" '{print $2}')
+    existing_port=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    existing_pwd=$(jq -r --arg tag "$tag" '.inbounds[] | select(.tag == $tag) | .password' "$SB_SERVER_CONFIG") || return 1
+    server_ip=$(grep -o "SERVER_IP='[^']*'" "$SB_STATE_FILE" | awk -F"'" '{print $2}')
 
     if [ -n "$existing_port" ] && [ "$existing_port" != "null" ]; then
         info "已存在ss入站配置,监听端口号为: $existing_port"
         info "已存在ss入站配置,密码为: $existing_pwd"
         info "本机ip为: $server_ip"
         echo ""
-        read -p "是否删除已存在的配置？ (y/n): " delete_option
+        read -r -p "是否删除已存在的配置？ (y/n): " delete_option || return 1
         if [ "$delete_option" = "y" ]; then
-            jq --arg tag "$tag" '.inbounds = (.inbounds | map(select(.tag != $tag)))' "$config_file" > "${config_file}.temp" && mv "${config_file}.temp" "$config_file"
-            echo "已删除配置"
-            reload_singbox
+            apply_server_change "删除 SS 落地机" '
+              if any(.inbounds[]; .tag == $tag and .type == "shadowsocks") then
+                .inbounds |= map(select(.tag != $tag))
+              else error("未找到 SS 入站") end
+            ' '' --arg tag "$tag" || return 1
         else
             echo "未删除配置"
         fi
     else
-        while true; do
-            read -p "请输入解锁服务监听端口: " fport
-            if [[ -n "$fport" && "$fport" =~ ^[0-9]+$ ]]; then
-                break
-            else
-                warning "端口必须为非空数字，请重新输入."
-            fi
-        done
-        sspwd=$(/root/sbox/sing-box generate rand 16 --base64)
+        fport=$(generate_port "SS 解锁服务") || return 1
+        sspwd=$("$SB_SING_BOX_BIN" generate rand 16 --base64) || return 1
+        [ -n "$sspwd" ] || return 1
         info "监听端口号为: $fport"
         info "ss密码为：$sspwd"
         info "本机ip为: $server_ip"
-        jq --arg sspwd "$sspwd" --arg fport "$fport" '
+        apply_server_change "添加 SS 落地机" '
+            if any(.inbounds[]; .tag == "ss-in") then error("入站标签已存在") else . end |
             .inbounds += [
                 {   
                     "type": "shadowsocks",
@@ -2302,9 +2557,7 @@ process_ssko() {
                     "method": "2022-blake3-aes-128-gcm",
                     "password": $sspwd
                 }
-            ]' "$config_file" > "${config_file}.temp" && mv "${config_file}.temp" "$config_file"
-        echo "已添加ss解锁机配置"
-        reload_singbox
+            ]' '' --arg sspwd "$sspwd" --arg fport "$fport" || return 1
     fi
 }
 
@@ -2645,7 +2898,8 @@ if has_any_installation_marker; then
         error "请先备份并修复缺失文件，不会自动执行全新安装"
     fi
 
-    install_pkgs
+    install_pkgs || exit 1
+    install_shortcut || error "更新管理入口失败，已停止。"
     echo ""
     info "sing-box-reality-hysteria2 已安装"
     show_status
@@ -2684,7 +2938,7 @@ if has_any_installation_marker; then
           uninstall_singbox
         ;;
       2)
-          modify_singbox
+          modify_singbox || exit 1
           show_client_configuration
           exit 0
         ;;
@@ -2705,15 +2959,15 @@ if has_any_installation_marker; then
           exit 0
           ;;
       7)
-          process_doko
+          process_doko || exit 1
           exit 0
           ;;
       8)
-          process_dokoko
+          process_dokoko || exit 1
           exit 0
           ;;
       9)
-          process_ssko
+          process_ssko || exit 1
           exit 0
           ;;
       10)
@@ -2731,7 +2985,7 @@ if has_any_installation_marker; then
 	esac
 	fi
 
-install_pkgs
+install_pkgs || exit 1
 mkdir -p "/root/sbox/"
 
 install_singbox
@@ -2750,14 +3004,14 @@ short_id=$(/root/sbox/sing-box generate rand --hex 8)
 info "生成的uuid为:  $reality_uuid"
 info "生成的短id为:  $short_id"
 echo ""
-reality_port=$(generate_port "VISION_REALITY")
+reality_port=$(generate_port "VISION_REALITY") || error "未取得有效 Reality 端口。"
 info "生成的端口号为: $reality_port"
 reality_server_name="itunes.apple.com"
 while :; do
-    read -p "请输入需要偷取证书的网站，必须支持 TLS 1.3 and HTTP/2 (默认: $reality_server_name): " input_server_name
+    read -r -p "请输入 Reality 握手域名，必须支持 TLS 1.3 and HTTP/2 (默认: $reality_server_name): " input_server_name || exit 1
     reality_server_name=${input_server_name:-$reality_server_name}
 
-    if curl --tlsv1.3 --http2 -sI "https://$reality_server_name" | grep -q "HTTP/2"; then
+    if check_reality_target "$reality_server_name"; then
         break
     else
         echo "域名 $reality_server_name 不支持 TLS 1.3 或 HTTP/2，请重新输入."
@@ -2772,7 +3026,7 @@ echo ""
 hy_password=$(/root/sbox/sing-box generate rand --hex 8)
 info "password: $hy_password"
 echo ""
-hy_port=$(generate_port "HYSTERIA2")
+hy_port=$(generate_port "HYSTERIA2") || error "未取得有效 Hysteria2 端口。"
 info "生成的端口号为: $hy_port"
 read -p "输入自签证书域名 (默认为: bing.com): " hy_server_name
 hy_server_name=${hy_server_name:-bing.com}
@@ -2914,7 +3168,7 @@ if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
     systemctl daemon-reload
     systemctl enable sing-box > /dev/null 2>&1
     systemctl start sing-box
-    install_shortcut
+    install_shortcut || error "安装管理入口失败。"
     show_client_configuration
     warning "输入mianyang,即可打开菜单"
 else
