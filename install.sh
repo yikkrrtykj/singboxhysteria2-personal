@@ -2160,7 +2160,7 @@ wait_maintenance_runtime() {
     local attempt
     # Reload sends SIGHUP asynchronously; allow the listener replacement to run.
     sleep 1
-    for attempt in {1..10}; do
+    for ((attempt=1; attempt<=10; attempt++)); do
         maintenance_runtime_ok "$1" && return 0
         sleep 1
     done
