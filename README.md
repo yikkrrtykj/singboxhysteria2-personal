@@ -15,6 +15,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-
 - Hysteria2 服务端：`1000/1000 Mbps`
 - Hysteria2 客户端：`300/300 Mbps`
 
+服务端和生成的客户端配置默认不封锁目标 UDP 443（QUIC/HTTP3）。更新脚本不会自动删除已经部署的配置中的旧拒绝规则；已有部署需要备份配置、移除对应规则并通过配置检查后重新加载。
+
 服务端生成的客户端文件：
 
 ```text

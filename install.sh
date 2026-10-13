@@ -532,11 +532,6 @@ ${hy_server_port_json}
         "action": "hijack-dns"
       },
       {
-        "network": "udp",
-        "port": 443,
-        "action": "reject"
-      },
-      {
         "rule_set": "geosite-category-ads-all",
         "action": "reject"
       },
@@ -2821,11 +2816,6 @@ cat > /root/sbox/sbconfig_server.json << EOF
     "rules": [
       {
         "action": "sniff"
-      },
-      {
-        "network": "udp",
-        "port": 443,
-        "action": "reject"
       }
     ]
   },
