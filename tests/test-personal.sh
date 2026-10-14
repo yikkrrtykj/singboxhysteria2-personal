@@ -107,6 +107,8 @@ SERVER_IP='178.94.14.235'
 PUBLIC_KEY='$public_key'
 HY_SERVER_NAME='bing.com'
 HY_HOPPING=FALSE
+HY_HOPPING_START=
+HY_HOPPING_END=
 EOF
 cp "$SB_SERVER_CONFIG" "$TMP/real/sbconfig_server.json"
 # Reuse the original export function with all root paths redirected to the sandbox.
