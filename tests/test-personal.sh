@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Imported functions, sandbox mocks and sourced here-doc templates use these
+# variables indirectly; ShellCheck cannot trace those dynamic invocations.
+# shellcheck disable=SC1091,SC2034,SC2317
 set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
@@ -22,6 +25,7 @@ SB_SHORTCUT_FILE="$TMP/manager" SB_SHORTCUT_LINK="$TMP/mianyang"
 install_shortcut
 bash -n "$SB_SHORTCUT_FILE"
 grep -q 'singboxhysteria2-personal/main/install.sh' "$SB_SHORTCUT_FILE" || fail 'wrong shortcut source'
+# shellcheck disable=SC2016
 grep -q 'bash "$task_script" "$@"' "$SB_SHORTCUT_FILE" || fail 'shortcut loses arguments'
 
 # Core update must preserve config byte-for-byte, reject bad candidates, and
