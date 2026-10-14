@@ -3,6 +3,7 @@
 # variables indirectly; ShellCheck cannot trace those dynamic invocations.
 # shellcheck disable=SC1091,SC2034,SC2317
 set -Eeuo pipefail
+trap 'printf "FAIL at %s:%s\n" "${BASH_SOURCE[0]}" "$LINENO" >&2' ERR
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
