@@ -213,7 +213,9 @@ install_singbox() (
     tar -xzf "$temp/archive.tar.gz" -C "$temp" -- "$package/sing-box" || return 1
     candidate="$temp/sing-box"
     install -m 0755 "$temp/$package/sing-box" "$candidate" || return 1
-    [ "$("$candidate" version | awk '/^sing-box version / {print $3}')" = "$version" ] || return 1
+    [ "$("$candidate" version | awk '/^sing-box version / {print $3}')" = "$version" ] || {
+      warning "候选内核版本不匹配"; return 1;
+    }
     if [ -f "$SB_SERVER_CONFIG" ]; then
       "$candidate" check -c "$SB_SERVER_CONFIG" || { warning "新版内核不能读取现有配置，未替换"; return 1; }
     fi
