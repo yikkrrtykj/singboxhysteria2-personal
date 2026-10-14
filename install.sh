@@ -1,4 +1,5 @@
 #!/bin/bash
+umask 077
 
 
 red="\033[31m\033[01m"
@@ -12,14 +13,39 @@ error() { warning "$*" && exit 1; }
 info() { echo -e "${green}$*${reset}"; }
 hint() { echo -e "${yellow}$*${reset}"; }
 
+SING_BOX_VERSION_TAG="v1.14.3"
+PERSONAL_REPO_RAW_URL="https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main"
+SB_DIR="/root/sbox"
+SB_SERVER_CONFIG="$SB_DIR/sbconfig_server.json"
+SB_BIN="$SB_DIR/sing-box"
+SB_SHORTCUT_FILE="$SB_DIR/mianyang.sh"
+SB_SHORTCUT_LINK="/usr/bin/mianyang"
+
+version_at_least() {
+    local version="${1#v}"
+    local minimum="${2#v}"
+    local v_major v_minor v_patch m_major m_minor m_patch
+
+    IFS='.' read -r v_major v_minor v_patch _ <<< "$version"
+    IFS='.' read -r m_major m_minor m_patch _ <<< "$minimum"
+    v_major=${v_major:-0}; v_minor=${v_minor:-0}; v_patch=${v_patch:-0}
+    m_major=${m_major:-0}; m_minor=${m_minor:-0}; m_patch=${m_patch:-0}
+    v_patch=${v_patch%%[^0-9]*}
+    m_patch=${m_patch%%[^0-9]*}
+
+    if ((10#$v_major > 10#$m_major)); then return 0; fi
+    if ((10#$v_major < 10#$m_major)); then return 1; fi
+    if ((10#$v_minor > 10#$m_minor)); then return 0; fi
+    if ((10#$v_minor < 10#$m_minor)); then return 1; fi
+    ((10#${v_patch:-0} >= 10#${m_patch:-0}))
+}
+
 show_notice() {
     local message="$1"
-    local terminal_width line padding padded_message
-    terminal_width="$(tput cols)"
-    line="$(printf '%*s' "$terminal_width" '')"
-    line="${line// /*}"
-    padding=$(( (terminal_width - ${#message}) / 2 ))
-    padded_message="$(printf "%*s%s" "$padding" '' "$message")"
+    local terminal_width=$(tput cols)
+    local line=$(printf "%*s" "$terminal_width" | tr ' ' '*')
+    local padding=$(( (terminal_width - ${#message}) / 2 ))
+    local padded_message="$(printf "%*s%s" $padding '' "$message")"
     warning "${bold}${line}${reset}"
     echo ""
     warning "${bold}${padded_message}${reset}"
@@ -76,34 +102,52 @@ show_status(){
 }
 
 install_pkgs() {
-  # Install qrencode, jq, and iptables if not already installed
-  local pkgs=("qrencode" "jq" "iptables")
-  for pkg in "${pkgs[@]}"; do
-    if command -v "$pkg" &> /dev/null; then
-      hint "$pkg 已经安装"
-    else
-      hint "开始安装 $pkg..."
-      if command -v apt &> /dev/null; then
-        sudo apt update > /dev/null 2>&1 && sudo apt install -y "$pkg" > /dev/null 2>&1
-      elif command -v yum &> /dev/null; then
-        sudo yum install -y "$pkg"
-      elif command -v dnf &> /dev/null; then
-        sudo dnf install -y "$pkg"
-      else
-        error "Unable to install $pkg. Please install it manually and rerun the script."
-      fi
-      hint "$pkg 安装成功"
+  local manager spec executable package
+  local ip_package=iproute2 ps_package=procps
+  local -a missing=()
+  [ "$(id -u)" -eq 0 ] || { warning "请以 root 运行。"; return 1; }
+  if command -v apt-get >/dev/null; then
+    manager=apt-get
+  elif command -v dnf >/dev/null; then
+    manager=dnf; ip_package=iproute; ps_package=procps-ng
+  elif command -v yum >/dev/null; then
+    manager=yum; ip_package=iproute; ps_package=procps-ng
+  else
+    warning "未找到支持的软件包管理器。"; return 1
+  fi
+  # Only tools used by this script; no Monitor ACL/runuser dependencies.
+  local -a dependencies=("qrencode:qrencode" "jq:jq" "iptables:iptables"
+    "curl:curl" "openssl:openssl" "tar:tar" "sha256sum:coreutils"
+    "ss:$ip_package" "ip:$ip_package" "pgrep:$ps_package" "flock:util-linux")
+  for spec in "${dependencies[@]}"; do
+    executable=${spec%%:*}; package=${spec#*:}
+    command -v "$executable" >/dev/null || missing+=("$package")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    hint "安装缺少的基础工具..."
+    if [ "$manager" = apt-get ]; then
+      apt-get update -qq || return 1
     fi
+    "$manager" install -y "${missing[@]}" ca-certificates || return 1
+  fi
+  for spec in "${dependencies[@]}"; do
+    executable=${spec%%:*}
+    command -v "$executable" >/dev/null || { warning "工具安装失败: $executable"; return 1; }
   done
 }
 
 install_shortcut() {
-  cat > /root/sbox/mianyang.sh << EOF
+  cat > "$SB_SHORTCUT_FILE" << EOF
 #!/usr/bin/env bash
-bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install.sh) \$1
+set -euo pipefail
+umask 077
+task_script=\$(mktemp)
+trap 'rm -f -- "\$task_script"' EXIT
+curl -fsSL --connect-timeout 15 --max-time 120 -o "\$task_script" "${PERSONAL_REPO_RAW_URL}/install.sh"
+bash "\$task_script" "\$@"
 EOF
-  chmod +x /root/sbox/mianyang.sh
-  ln -sf /root/sbox/mianyang.sh /usr/bin/mianyang
+  chmod 0700 "$SB_SHORTCUT_FILE" || return 1
+  ln -sf "$SB_SHORTCUT_FILE" "$SB_SHORTCUT_LINK" || return 1
 }
 
 reload_singbox() {
@@ -139,46 +183,42 @@ reload_singbox() {
 }
 
 
-install_singbox(){
-	echo "Installing sing-box 1.14.x stable version..."
-	# Phase D: fresh installs are pinned to the newest STABLE 1.14.x release.
-	# 1.13.x / 1.15.x / prereleases are rejected by the selector itself.
-	latest_version_tag="$(select_1_14_stable_tag)" || error "无法确定 sing-box 1.14.x stable 版本"
-	latest_version=${latest_version_tag#v}
-	echo "Selected 1.14.x stable version: $latest_version"
-		# Detect server architecture
-		arch=$(uname -m)
-		echo "本机架构为: $arch"
-    case ${arch} in
-      x86_64) arch="amd64" ;;
-      aarch64) arch="arm64" ;;
-      armv7l) arch="armv7" ;;
+install_singbox() (
+    # Download only the pinned official stable release; do not change config.
+    local version="${SING_BOX_VERSION_TAG#v}" arch package metadata url digest actual temp candidate
+    [[ "$SING_BOX_VERSION_TAG" =~ ^v1\.14\.[0-9]+$ ]] || { warning "版本必须是正式版 1.14.x"; return 1; }
+    case "$(uname -m)" in
+      x86_64) arch=amd64 ;;
+      aarch64) arch=arm64 ;;
+      armv7l) arch=armv7 ;;
+      *) warning "不支持的 CPU 架构"; return 1 ;;
     esac
-    echo "最新版本为: $latest_version"
-    package_name="sing-box-${latest_version}-linux-${arch}"
-    url="https://github.com/SagerNet/sing-box/releases/download/${latest_version_tag}/${package_name}.tar.gz"
-    archive_path="/root/${package_name}.tar.gz"
-    candidate_path="/root/sbox/sing-box.new"
-    curl -4 -fL --progress-bar -o "$archive_path" "$url" || error "下载 sing-box 失败"
-    tar -tzf "$archive_path" >/dev/null 2>&1 || error "下载包校验失败"
-    tar -xzf "$archive_path" -C /root || error "解压 sing-box 失败"
-    install -m 0755 -o root -g root "/root/${package_name}/sing-box" "$candidate_path" || error "准备新版 sing-box 失败"
-    rm -rf "$archive_path" "/root/${package_name}"
-
-    if [ -f /root/sbox/sbconfig_server.json ]; then
-        "$candidate_path" check -c /root/sbox/sbconfig_server.json || {
-            rm -f "$candidate_path"
-            error "新版 sing-box 无法通过现有配置检查，已保留当前版本"
-        }
+    package="sing-box-${version}-linux-${arch}"
+    temp=$(mktemp -d "${SB_DIR}/.kernel-download.XXXXXX") || return 1
+    trap 'rm -rf -- "$temp"' EXIT
+    metadata="$temp/release.json"
+    curl --proto '=https' -fsSL --connect-timeout 10 --max-time 60 \
+      -o "$metadata" "https://api.github.com/repos/SagerNet/sing-box/releases/tags/$SING_BOX_VERSION_TAG" || return 1
+    jq -e --arg tag "$SING_BOX_VERSION_TAG" \
+      '.tag_name == $tag and .draft == false and .prerelease == false' "$metadata" >/dev/null || return 1
+    url=$(jq -er --arg name "$package.tar.gz" '.assets[] | select(.name == $name) | .browser_download_url' "$metadata") || return 1
+    digest=$(jq -er --arg name "$package.tar.gz" '.assets[] | select(.name == $name) | .digest' "$metadata") || return 1
+    [[ "$url" == "https://github.com/SagerNet/sing-box/releases/download/$SING_BOX_VERSION_TAG/$package.tar.gz" &&
+       "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { warning "官方资源地址或 SHA256 缺失"; return 1; }
+    info "安装官方 sing-box $version ..."
+    curl --proto '=https' -fsSL --retry 2 --connect-timeout 10 --max-time 180 \
+      -o "$temp/archive.tar.gz" "$url" || return 1
+    actual=$(sha256sum "$temp/archive.tar.gz") || return 1
+    [ "${actual%% *}" = "${digest#sha256:}" ] || { warning "SHA256 校验失败"; return 1; }
+    tar -xzf "$temp/archive.tar.gz" -C "$temp" -- "$package/sing-box" || return 1
+    candidate="$temp/sing-box"
+    install -m 0755 "$temp/$package/sing-box" "$candidate" || return 1
+    [ "$("$candidate" version | awk '/^sing-box version / {print $3}')" = "$version" ] || return 1
+    if [ -f "$SB_SERVER_CONFIG" ]; then
+      "$candidate" check -c "$SB_SERVER_CONFIG" || { warning "新版内核不能读取现有配置，未替换"; return 1; }
     fi
-
-    if [ -x /root/sbox/sing-box ]; then
-        backup_path="/root/sbox/sing-box.backup-$(date +%Y%m%d-%H%M%S)"
-        cp -a /root/sbox/sing-box "$backup_path" || error "备份当前 sing-box 失败"
-        info "旧版 sing-box 已备份到: $backup_path"
-    fi
-    mv -f "$candidate_path" /root/sbox/sing-box || error "替换 sing-box 失败"
-}
+    mv -f -- "$candidate" "$SB_BIN" || return 1
+)
 
 restart_singbox() {
     if systemctl is-active --quiet sing-box; then
@@ -231,10 +271,10 @@ show_client_configuration() {
   short_id=$(jq -r '.inbounds[] | select(.tag == "vless-in") | .tls.reality.short_id[0]' /root/sbox/sbconfig_server.json)
   reality_link="vless://$reality_uuid@$server_ip:$reality_port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$reality_server_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#SING-BOX-REALITY"
   echo ""
-  show_notice "VISION_REALITY 通用链接 二维码 通用参数" 
+  show_notice "VISION_REALITY 通用链接 二维码 通用参数"
   echo ""
   info "通用链接如下"
-  echo "" 
+  echo ""
   echo "$reality_link"
   echo ""
   info "二维码如下"
@@ -277,11 +317,11 @@ show_client_configuration() {
       hy2_link="hysteria2://$hy_password@$server_ip:$hy_port?insecure=1&sni=$hy_server_name#SING-BOX-HYSTERIA2"
   fi
   echo ""
-  echo "" 
-  show_notice "Hysteria2通用链接 二维码 通用参数" 
+  echo ""
+  show_notice "Hysteria2通用链接 二维码 通用参数"
   echo ""
   info "通用链接如下"
-  echo "" 
+  echo ""
   echo "$hy2_link"
   echo ""
   info "二维码如下"
@@ -304,8 +344,103 @@ show_client_configuration() {
 
   show_notice "Mihomo/Clash Meta客户端配置参数"
   mihomo_config_path="/root/sbox/mihomo_client.yaml"
-  # 共享账号（users[0]）的展示路径；多客户端请用"客户端管理 -> 生成客户端配置"
-  write_mihomo_template "$mihomo_config_path" || error "保存 Mihomo 客户端配置失败"
+cat > "$mihomo_config_path" << EOF || error "保存 Mihomo 客户端配置失败"
+mixed-port: 7897
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+unified-delay: true
+ipv6: true
+profile:
+  store-selected: true
+  store-fake-ip: true
+dns:
+  enable: true
+  listen: "0.0.0.0:53"
+  ipv6: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 8.8.8.8
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://doh.pub/dns-query
+  fallback:
+    - https://1.0.0.1/dns-query
+    - tls://dns.google
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+
+tun:
+  enable: true
+  stack: mixed
+  device: Mihomo
+  mtu: 1420
+  auto-route: true
+  auto-redirect: true
+  auto-detect-interface: true
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+
+proxies:
+  - name: Reality
+    type: vless
+    server: $server_ip
+    port: $reality_port
+    uuid: $reality_uuid
+    network: tcp
+    udp: true
+    tls: true
+    flow: xtls-rprx-vision
+    servername: $reality_server_name
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: $public_key
+      short-id: $short_id
+
+  - name: Hysteria2
+    type: hysteria2
+    server: $server_ip
+${hy_clash_port_yaml}
+    password: $hy_password
+    up: "300 Mbps"
+    down: "300 Mbps"
+    sni: $hy_server_name
+    skip-cert-verify: true
+    alpn:
+      - h3
+
+proxy-groups:
+  - name: 节点选择
+    type: select
+    proxies:
+      - Reality
+      - Hysteria2
+      - 自动选择
+      - DIRECT
+
+  - name: 自动选择
+    type: url-test
+    proxies:
+      - Reality
+      - Hysteria2
+    url: "http://www.gstatic.com/generate_204"
+    interval: 300
+    tolerance: 50
+
+
+rules:
+  - GEOIP,LAN,DIRECT
+  - GEOIP,CN,DIRECT
+  - MATCH,节点选择
+
+EOF
   chmod 0600 "$mihomo_config_path" || error "设置 Mihomo 客户端配置权限失败"
   cat "$mihomo_config_path"
   echo ""
@@ -650,7 +785,7 @@ EOF
     printf "umask 077 && printf '%%s' '%s' | base64 -d > /tmp/mihomo_client.yaml && chmod 600 /tmp/mihomo_client.yaml\n" "$mihomo_config_base64"
     echo ""
     info "命令 2：下载 Linux 网关安装器"
-    echo "curl -fsSL -o /tmp/install-linux-gateway.sh https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria2/main/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
+    echo "curl -fsSL -o /tmp/install-linux-gateway.sh ${PERSONAL_REPO_RAW_URL}/install-linux-gateway.sh && chmod 700 /tmp/install-linux-gateway.sh"
     echo ""
     info "命令 3：安装 Mihomo、启用 TUN 网关并开放局域网 9090 UI"
     # Keep command substitution literal so it runs on the Linux client.
@@ -663,1296 +798,6 @@ EOF
   fi
 
 }
-
-# >>> phase-c client-management >>> ============================================
-# Phase C: multi-client identity management.
-#
-# Single source of truth remains /root/sbox/sbconfig_server.json (no clients.json).
-# Every logical client is ONE name present in BOTH inbounds:
-#   vless-in.users[] -> {"name": ..., "uuid": ..., "flow": "xtls-rprx-vision"}
-#   hy2-in.users[]   -> {"name": ..., "password": ...}
-# Hard rule: Reality name == HY2 name == device_id.
-# The name "legacy" is RESERVED: it labels the pre-Phase-C shared account,
-# is never created through "add client" and never deleted by this version.
-# Everything under /root/sbox/clients/ is DERIVED output; it can always be
-# regenerated from the server config.
-SB_SERVER_CONFIG="${SB_SERVER_CONFIG:-/root/sbox/sbconfig_server.json}"
-SB_STATE_FILE="${SB_STATE_FILE:-/root/sbox/config}"
-SB_CLIENTS_DIR="${SB_CLIENTS_DIR:-/root/sbox/clients}"
-SB_SING_BOX_BIN="${SB_SING_BOX_BIN:-/root/sbox/sing-box}"
-SB_LOCK_FILE="${SB_LOCK_FILE:-/root/sbox/config.lock}"
-RESERVED_CLIENT_NAME="legacy"
-CLIENT_NAME_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$'
-REALITY_INBOUND_TAG="vless-in"
-HY2_INBOUND_TAG="hy2-in"
-
-validate_client_name() { # validate_client_name <name> -> rc 0 if allowed
-    local name="$1"
-    [ -n "$name" ] || return 1
-    [[ "$name" =~ $CLIENT_NAME_PATTERN ]] || return 1
-    return 0
-}
-
-# Seconds to wait for the exclusive config lock before aborting. Other helpers
-# MUST run with a finite timeout; the CLI default stays generous.
-SB_LOCK_TIMEOUT="${SB_LOCK_TIMEOUT:-15}"
-
-# Runs "$@" while holding the exclusive config lock (fd 9), so two management
-# operations can never mutate sbconfig_server.json concurrently.
-# FAIL-CLOSED: a missing flock binary, an unopenable lock file, an acquire
-# error or a timeout each abort WITHOUT ever running "$@" -- no candidate, no
-# backup, no config mutation and no reload is attempted unlocked.
-with_client_lock() {
-    if ! command -v flock >/dev/null 2>&1; then
-        warning "flock 不可用，无法安全地序列化配置修改，操作已中止（fail-closed）"
-        return 1
-    fi
-    if ! mkdir -p "$(dirname "$SB_LOCK_FILE")" 2>/dev/null; then
-        warning "无法创建锁目录 $(dirname "$SB_LOCK_FILE")，操作已中止（fail-closed）"
-        return 1
-    fi
-    if ! exec 9>>"$SB_LOCK_FILE" 2>/dev/null; then
-        warning "无法打开配置锁文件 $SB_LOCK_FILE，操作已中止（fail-closed）"
-        return 1
-    fi
-    if ! flock -w "$SB_LOCK_TIMEOUT" 9 2>/dev/null; then
-        warning "配置锁 $SB_LOCK_FILE 获取失败或超时（${SB_LOCK_TIMEOUT}s），操作已中止（fail-closed）"
-        exec 9>&- 2>/dev/null
-        return 1
-    fi
-    "$@"
-    local rc=$?
-    exec 9>&- 2>/dev/null
-    return $rc
-}
-
-get_reality_client_names() { # [config] -> one name per line ("" = unnamed user)
-    jq -r --arg tag "$REALITY_INBOUND_TAG" \
-        '.inbounds[] | select(.tag == $tag) | .users[]? | (.name // "")' \
-        "${1:-$SB_SERVER_CONFIG}" 2>/dev/null | tr -d '\r'
-}
-
-get_hy2_client_names() { # [config] -> one name per line ("" = unnamed user)
-    jq -r --arg tag "$HY2_INBOUND_TAG" \
-        '.inbounds[] | select(.tag == $tag) | .users[]? | (.name // "")' \
-        "${1:-$SB_SERVER_CONFIG}" 2>/dev/null | tr -d '\r'
-}
-
-# Structural precheck only: root must be an object, .inbounds must exist and be
-# an array, vless-in/hy2-in must each appear EXACTLY once, and their users
-# field must exist and be an array. Deliberately separate from the identity
-# audit: legacy migration must accept users WITHOUT names, so it runs only
-# this check before counting unnamed users. The jq exit code propagates to the
-# function: any runtime error means FAIL, never "no problems".
-client_structure_problems() { # client_structure_problems <config> -> prints problem lines
-    jq -r '
-      if (type != "object") then ["配置根节点不是 object"]
-      elif ((.inbounds // null) | type) != "array" then
-        (if (.inbounds // null) == null then ["缺少 inbounds 字段"] else ["inbounds 不是数组"] end)
-      else
-        (
-          ([.inbounds[] | select(.tag == "vless-in")]) as $ri |
-          ([.inbounds[] | select(.tag == "hy2-in")]) as $hi |
-          ([]
-            + (if ($ri | length) == 0 then ["缺少 vless-in 入站"] else [] end)
-            + (if ($ri | length) > 1 then ["vless-in 入站数量不是 1（实际 \($ri | length) 个）"] else [] end)
-            + (if ($hi | length) == 0 then ["缺少 hy2-in 入站"] else [] end)
-            + (if ($hi | length) > 1 then ["hy2-in 入站数量不是 1（实际 \($hi | length) 个）"] else [] end)
-            + (if ($ri | length) == 1 then
-                 (if ($ri[0] | has("users") | not) then ["vless-in 缺少 users 字段"]
-                  elif (($ri[0].users) | type) != "array" then ["vless-in 的 users 不是数组"]
-                  else [] end)
-               else [] end)
-            + (if ($hi | length) == 1 then
-                 (if ($hi[0] | has("users") | not) then ["hy2-in 缺少 users 字段"]
-                  elif (($hi[0].users) | type) != "array" then ["hy2-in 的 users 不是数组"]
-                  else [] end)
-               else [] end)
-          )
-        )
-      end | .[]
-    ' "$1" 2>/dev/null
-}
-
-# Full identity audit: structure first, then the per-user rules. FAIL-CLOSED:
-# a jq/runtime error inside either stage is an audit FAILURE, never "no
-# problems found" -- callers must check this function's exit code, not just
-# its stdout.
-candidate_problems() { # candidate_problems <config> -> prints problem lines (empty = OK)
-    local structural
-    structural="$(client_structure_problems "$1")" || return $?
-    if [ -n "$structural" ]; then
-        printf '%s\n' "$structural"
-        return 0
-    fi
-    jq -r '
-      ([.inbounds[] | select(.tag == "vless-in")][0].users) as $ru |
-      ([.inbounds[] | select(.tag == "hy2-in")][0].users) as $hu |
-      ([ $ru[] | .name // "" ]) as $rn |
-      ([ $hu[] | .name // "" ]) as $hn |
-      ([ $ru[] | .uuid // "" ]) as $rid |
-      ([ $hu[] | .password // "" ]) as $hp |
-      ([ $ru[] | .flow // "" ]) as $rf |
-      ([]
-        + (if ($rn | index("")) != null then ["vless-in 存在没有 name 的用户"] else [] end)
-        + (if ($hn | index("")) != null then ["hy2-in 存在没有 name 的用户"] else [] end)
-        + (if ($rn | sort) == ($hn | sort) then [] else ["Reality 与 HY2 的 name 集合不一致"] end)
-        + (if ($rn | length) == ($rn | unique | length) then [] else ["vless-in 存在重复 name"] end)
-        + (if ($hn | length) == ($hn | unique | length) then [] else ["hy2-in 存在重复 name"] end)
-        + (if ($rid | index("")) != null then ["vless-in 存在没有 uuid 的用户"] else [] end)
-        + (if ($hp | index("")) != null then ["hy2-in 存在没有 password 的用户"] else [] end)
-        + (if ($rid | length) == ($rid | unique | length) then [] else ["vless-in 存在重复 uuid"] end)
-        + (if ($hp | length) == ($hp | unique | length) then [] else ["hy2-in 存在重复 password"] end)
-        + (if ($rf | all(. == "xtls-rprx-vision")) then [] else ["vless-in 存在 flow 不等于 xtls-rprx-vision 的用户"] end)
-      )[]
-    ' "$1" 2>/dev/null
-}
-
-audit_client_consistency() { # audit_client_consistency [config] -> table + rc
-    local cfg="${1:-$SB_SERVER_CONFIG}" problems rn hn union name r h p
-    if [ ! -f "$cfg" ]; then
-        warning "服务端配置不存在: $cfg"
-        return 1
-    fi
-    if ! jq empty "$cfg" >/dev/null 2>&1; then
-        warning "服务端配置不是合法 JSON: $cfg"
-        return 1
-    fi
-    # FAIL-CLOSED: a jq/runtime error inside the audit is an audit failure,
-    # never equivalent to "no problems found".
-    if ! problems="$(candidate_problems "$cfg")"; then
-        warning "客户端结构审计执行失败: $cfg"
-        return 1
-    fi
-    rn="$(get_reality_client_names "$cfg")"
-    hn="$(get_hy2_client_names "$cfg")"
-    printf '%-16s %-12s %s\n' "NAME" "REALITY" "HY2"
-    union="$(printf '%s\n%s\n' "$rn" "$hn" | sed '/^$/d' | sort -u)"
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        r="MISSING"; h="MISSING"
-        grep -qxF "$name" <<<"$rn" && r="OK"
-        grep -qxF "$name" <<<"$hn" && h="OK"
-        printf '%-16s %-12s %s\n' "$name" "$r" "$h"
-    done <<< "$union"
-    if [ -n "$problems" ]; then
-        warning "客户端一致性检查发现问题:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$problems"
-        return 1
-    fi
-    info "客户端一致性检查通过（Reality 与 HY2 的 name 集合完全一致）"
-    return 0
-}
-
-# Reload the running instance; succeeds trivially when nothing is running
-# (e.g. config-only change with the service stopped). Propagates failure so
-# commit_server_config can roll back.
-reload_running_singbox() {
-    if systemctl is-active --quiet sing-box 2>/dev/null; then
-        systemctl reload sing-box || return 1
-    elif pgrep -x sing-box >/dev/null 2>&1; then
-        kill -HUP "$(pgrep -o -x sing-box)" || return 1
-    fi
-    return 0
-}
-
-# After a reload the previously running instance must still be alive.
-reload_health_ok() {
-    sleep 1
-    if systemctl is-active --quiet sing-box 2>/dev/null; then return 0; fi
-    pgrep -x sing-box >/dev/null 2>&1
-}
-
-# Internal transaction commit. The CALLER must already hold the client config
-# lock (see with_client_lock): the whole read -> audit -> candidate -> commit
-# sequence has to run under one exclusive lock or two concurrent managers could
-# lose each other's update. This function never acquires the lock itself.
-#   candidate -> structural audit -> sing-box check -> backup -> atomic mv
-#   -> reload -> health check; on any failure after the mv the previous config
-#   is restored and reloaded, so the disk state is never left half-migrated.
-commit_server_config() { # commit_server_config <candidate> <description>
-    local candidate="$1" description="${2:-server config update}"
-    local backup_path was_running problems
-    [ -f "$candidate" ] || { warning "candidate 不存在: $candidate"; return 1; }
-
-    # FAIL-CLOSED: a jq/runtime error while auditing the candidate must abort
-    # the transaction, never be treated as "candidate is fine".
-    if ! problems="$(candidate_problems "$candidate")"; then
-        warning "candidate 结构审计执行失败（$description），正式配置未修改"
-        rm -f "$candidate"
-        return 1
-    fi
-    if [ -n "$problems" ]; then
-        warning "candidate 结构一致性检查失败（$description），正式配置未修改:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$problems"
-        rm -f "$candidate"
-        return 1
-    fi
-
-    if ! "$SB_SING_BOX_BIN" check -c "$candidate" >/dev/null 2>&1; then
-        warning "sing-box check 未通过（$description），正式配置未修改"
-        rm -f "$candidate"
-        return 1
-    fi
-
-    if systemctl is-active --quiet sing-box 2>/dev/null; then
-        was_running=systemd
-    elif pgrep -x sing-box >/dev/null 2>&1; then
-        was_running=manual
-    else
-        was_running=no
-    fi
-
-    # Unique per transaction, even twice in the same second of one process.
-    backup_path="$(new_backup_path)" || {
-        warning "创建备份文件失败（$description），正式配置未修改"
-        rm -f "$candidate"
-        return 1
-    }
-    cp -a "$SB_SERVER_CONFIG" "$backup_path" || {
-        warning "备份正式配置失败（$description），正式配置未修改"
-        rm -f "$candidate"
-        return 1
-    }
-
-    if ! mv -f "$candidate" "$SB_SERVER_CONFIG"; then
-        warning "原子替换失败（$description），已保留备份: $backup_path"
-        rm -f "$candidate"
-        return 1
-    fi
-
-    if [ "$was_running" != "no" ]; then
-        if reload_running_singbox && reload_health_ok; then
-            info "配置已提交并重载成功: $description"
-            info "上一份配置备份: $backup_path"
-            return 0
-        fi
-        warning "reload 后健康检查失败（$description），自动回滚..."
-        cp -a "$backup_path" "$SB_SERVER_CONFIG"
-        # The rollback reload's exit code matters: a failed reload command with a
-        # still-alive process must NOT be reported as a successful recovery.
-        if reload_running_singbox && reload_health_ok; then
-            warning "已回滚并重新加载上一份配置: $backup_path"
-        else
-            warning "已回滚配置文件，但服务未能确认恢复，请立即人工检查！备份: $backup_path"
-        fi
-        return 1
-    fi
-
-    info "配置已提交（当前无运行中的 sing-box 进程，跳过 reload）: $description"
-    info "上一份配置备份: $backup_path"
-    return 0
-}
-
-new_candidate_path() { # new_candidate_path -> unique candidate file next to the live config
-    mktemp "${SB_SERVER_CONFIG}.candidate.XXXXXX" 2>/dev/null
-}
-
-new_backup_path() { # new_backup_path -> unique backup file next to the live config
-    mktemp "${SB_SERVER_CONFIG}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX" 2>/dev/null
-}
-client_name_exists() { # client_name_exists <name> [config] -> rc 0 if present in either inbound
-    local name="$1" cfg="${2:-$SB_SERVER_CONFIG}"
-    grep -qxF "$name" <(get_reality_client_names "$cfg") ||
-        grep -qxF "$name" <(get_hy2_client_names "$cfg")
-}
-
-# One-shot, key-preserving migration of the pre-Phase-C shared account:
-#   {"uuid": "AAAA", ...}  ->  {"name": "legacy", "uuid": "AAAA", ...}
-# Only fills in the missing name; never touches uuid/password/flow.
-# Idempotent: running it again on an already-migrated config is a no-op.
-# The ENTIRE decision + candidate generation runs under the config lock, so a
-# migration can never interleave with a concurrent add/delete.
-migrate_legacy_clients() {
-    with_client_lock _migrate_legacy_clients_locked
-}
-
-_migrate_legacy_clients_locked() {
-    local cfg="$SB_SERVER_CONFIG" candidate r_unnamed h_unnamed structural
-    [ -f "$cfg" ] || { warning "服务端配置不存在: $cfg"; return 1; }
-    if ! jq empty "$cfg" >/dev/null 2>&1; then
-        warning "服务端配置不是合法 JSON: $cfg"
-        return 1
-    fi
-    # Structure precheck (identity audit would wrongly reject nameless users,
-    # which is exactly what migration must accept). For {} this must FAIL,
-    # never fall through to "all users already named".
-    if ! structural="$(client_structure_problems "$cfg")"; then
-        warning "客户端结构审计执行失败: $cfg"
-        return 1
-    fi
-    if [ -n "$structural" ]; then
-        warning "配置结构不满足迁移前提:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$structural"
-        return 1
-    fi
-    r_unnamed="$(get_reality_client_names "$cfg" | grep -c '^$' || true)"
-    h_unnamed="$(get_hy2_client_names "$cfg" | grep -c '^$' || true)"
-    if [ "$r_unnamed" -eq 0 ] && [ "$h_unnamed" -eq 0 ]; then
-        info "所有用户都已具备 name，无需迁移"
-        return 0
-    fi
-    if [ "$r_unnamed" != "$h_unnamed" ]; then
-        warning "Reality 有 $r_unnamed 个无名用户，HY2 有 $h_unnamed 个，无法安全迁移；请先运行一致性检查"
-        return 1
-    fi
-    if [ "$r_unnamed" -gt 1 ]; then
-        warning "存在多个无名用户，无法确定哪一个是 legacy，已拒绝迁移"
-        return 1
-    fi
-    if grep -qxF "$RESERVED_CLIENT_NAME" <(get_reality_client_names "$cfg") ||
-       grep -qxF "$RESERVED_CLIENT_NAME" <(get_hy2_client_names "$cfg"); then
-        warning "配置中已存在名为 $RESERVED_CLIENT_NAME 的用户，拒绝迁移以避免覆盖"
-        return 1
-    fi
-
-    candidate="$(new_candidate_path)" || { warning "创建 candidate 失败"; return 1; }
-    jq --arg legacy "$RESERVED_CLIENT_NAME" '
-      (.inbounds[] | select(.tag == "vless-in") | .users) |=
-        map(if has("name") then . else . + {"name": $legacy} end) |
-      (.inbounds[] | select(.tag == "hy2-in") | .users) |=
-        map(if has("name") then . else . + {"name": $legacy} end)
-    ' "$cfg" > "$candidate" || { warning "生成迁移 candidate 失败"; rm -f "$candidate"; return 1; }
-
-    commit_server_config "$candidate" "migrate unnamed user to legacy"
-}
-
-add_client() { # add_client <name> -> adds to BOTH inbounds atomically
-    with_client_lock _add_client_locked "$1"
-}
-
-# Runs under the config lock: every judgement below re-reads the LIVE config,
-# so a transaction that lost the lock race starts from the winner's state
-# instead of overwriting it with a stale snapshot (no lost update).
-_add_client_locked() {
-    local name="$1" candidate uuid password
-    if ! validate_client_name "$name"; then
-        warning "客户端名称非法: '$name'（允许: 字母/数字开头，仅字母数字._-，长度 1-32）"
-        return 1
-    fi
-    if [ "$name" = "$RESERVED_CLIENT_NAME" ]; then
-        warning "'$RESERVED_CLIENT_NAME' 是保留名称，不能通过添加客户端创建"
-        return 1
-    fi
-    [ -f "$SB_SERVER_CONFIG" ] || { warning "服务端配置不存在: $SB_SERVER_CONFIG"; return 1; }
-    if ! jq empty "$SB_SERVER_CONFIG" >/dev/null 2>&1; then
-        warning "服务端配置不是合法 JSON: $SB_SERVER_CONFIG"
-        return 1
-    fi
-    if ! audit_client_consistency "$SB_SERVER_CONFIG" >/dev/null; then
-        warning "当前 Reality/HY2 用户集合不一致，先修复后再添加客户端（运行一致性检查）"
-        audit_client_consistency "$SB_SERVER_CONFIG"
-        return 1
-    fi
-    if client_name_exists "$name" "$SB_SERVER_CONFIG"; then
-        warning "客户端 '$name' 已存在（Reality 或 HY2），拒绝重复添加"
-        return 1
-    fi
-
-    if ! uuid="$("$SB_SING_BOX_BIN" generate uuid)" || [ -z "$uuid" ]; then
-        warning "生成 Reality UUID 失败"
-        return 1
-    fi
-    if ! password="$("$SB_SING_BOX_BIN" generate rand --hex 16)" || [ -z "$password" ]; then
-        warning "生成 Hysteria2 password 失败"
-        return 1
-    fi
-
-    candidate="$(new_candidate_path)" || { warning "创建 candidate 失败"; return 1; }
-    jq --arg name "$name" --arg uuid "$uuid" --arg password "$password" '
-      (.inbounds[] | select(.tag == "vless-in") | .users) += [
-        {"name": $name, "uuid": $uuid, "flow": "xtls-rprx-vision"}
-      ] |
-      (.inbounds[] | select(.tag == "hy2-in") | .users) += [
-        {"name": $name, "password": $password}
-      ]
-    ' "$SB_SERVER_CONFIG" > "$candidate" || {
-        warning "生成 add candidate 失败"; rm -f "$candidate"; return 1
-    }
-
-    # Single transaction: Reality + HY2 appear together or not at all.
-    if commit_server_config "$candidate" "add client $name"; then
-        info "客户端 '$name' 已同时添加到 Reality 与 HY2（UUID/password 已生成）"
-        return 0
-    fi
-    return 1
-}
-
-delete_client() { # delete_client <name> -> removes from BOTH inbounds atomically
-    # Confirmation happens outside the lock (it is interactive UI), but every
-    # safety judgement is re-made against the LIVE config inside the lock, so a
-    # config changed between "y" and the transaction cannot be deleted blindly.
-    local name="$1" r_found h_found confirm
-    if [ "$name" = "$RESERVED_CLIENT_NAME" ]; then
-        warning "'$RESERVED_CLIENT_NAME' 是保留名称，本版本禁止删除（legacy retirement 属于后续功能）"
-        return 1
-    fi
-    [ -n "$name" ] || { warning "客户端名称不能为空"; return 1; }
-    [ -f "$SB_SERVER_CONFIG" ] || { warning "服务端配置不存在: $SB_SERVER_CONFIG"; return 1; }
-
-    r_found="MISSING"; h_found="MISSING"
-    grep -qxF "$name" <(get_reality_client_names "$SB_SERVER_CONFIG") && r_found="FOUND"
-    grep -qxF "$name" <(get_hy2_client_names "$SB_SERVER_CONFIG") && h_found="FOUND"
-    info "准备删除客户端: $name"
-    info "Reality: $r_found"
-    info "HY2:     $h_found"
-    read -r -p "确认删除 '$name'？此操作会同时移除 Reality 与 HY2 凭据 (y/n): " confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-        info "已取消删除 '$name'"
-        return 1
-    fi
-
-    with_client_lock _delete_client_locked "$name"
-}
-
-_delete_client_locked() {
-    local name="$1" candidate
-    # The destructive helper revalidates EVERYTHING itself and never trusts the
-    # outer delete_client(): order is name syntax -> reserved -> consistency
-    # audit -> existence -> mutation. Any rejection leaves the live config and
-    # the filesystem untouched.
-    if ! validate_client_name "$name"; then
-        warning "客户端名称非法: '$name'（locked helper 二次防护，允许: 字母/数字开头，仅字母数字._-，长度 1-32）"
-        return 1
-    fi
-    # Invariant enforced again INSIDE the destructive helper: even a future
-    # caller that bypasses delete_client must never be able to remove legacy.
-    if [ "$name" = "$RESERVED_CLIENT_NAME" ]; then
-        warning "'$RESERVED_CLIENT_NAME' 是保留名称，本版本禁止删除（locked helper 二次防护）"
-        return 1
-    fi
-    if ! audit_client_consistency "$SB_SERVER_CONFIG" >/dev/null; then
-        warning "当前 Reality/HY2 用户集合不一致，禁止破坏性操作（先运行一致性检查并修复）"
-        audit_client_consistency "$SB_SERVER_CONFIG"
-        return 1
-    fi
-    if ! grep -qxF "$name" <(get_reality_client_names "$SB_SERVER_CONFIG") ||
-       ! grep -qxF "$name" <(get_hy2_client_names "$SB_SERVER_CONFIG"); then
-        warning "客户端 '$name' 未在两个协议中同时存在（锁内复核），拒绝删除（请先修复一致性）"
-        return 1
-    fi
-
-    candidate="$(new_candidate_path)" || { warning "创建 candidate 失败"; return 1; }
-    jq --arg name "$name" '
-      (.inbounds[] | select(.tag == "vless-in") | .users) |=
-        map(select(.name != $name)) |
-      (.inbounds[] | select(.tag == "hy2-in") | .users) |=
-        map(select(.name != $name))
-    ' "$SB_SERVER_CONFIG" > "$candidate" || {
-        warning "生成 delete candidate 失败"; rm -f "$candidate"; return 1
-    }
-
-    if ! commit_server_config "$candidate" "delete client $name"; then
-        warning "服务端修改失败，客户端配置目录 $SB_CLIENTS_DIR/$name 保持不变"
-        return 1
-    fi
-    # Only after the server-side commit succeeded may the derived files go.
-    # The name was revalidated above; "--" only stops option parsing, it is
-    # never a substitute for validation.
-    if [ -d "$SB_CLIENTS_DIR/$name" ]; then
-        rm -rf -- "${SB_CLIENTS_DIR:?}/$name"
-        info "已删除派生客户端配置目录: $SB_CLIENTS_DIR/$name"
-    fi
-    info "客户端 '$name' 已从 Reality 与 HY2 同时删除"
-}
-get_client_credentials() { # get_client_credentials <name> [config] -> "uuid\npassword"
-    local name="$1" cfg="${2:-$SB_SERVER_CONFIG}" uuid password
-    uuid="$(jq -r --arg name "$name" --arg tag "$REALITY_INBOUND_TAG" '
-        .inbounds[] | select(.tag == $tag) | .users[]? | select(.name == $name) | .uuid // ""
-    ' "$cfg" 2>/dev/null)"
-    password="$(jq -r --arg name "$name" --arg tag "$HY2_INBOUND_TAG" '
-        .inbounds[] | select(.tag == $tag) | .users[]? | select(.name == $name) | .password // ""
-    ' "$cfg" 2>/dev/null)"
-    [ -n "$uuid" ] && [ -n "$password" ] || return 1
-    printf '%s\n%s\n' "$uuid" "$password"
-}
-
-# Writes the Mihomo/Clash Meta client YAML using caller-scope variables:
-#   $server_ip $reality_port $reality_uuid $reality_server_name $public_key
-#   $short_id $hy_clash_port_yaml $hy_password $hy_server_name
-# Only the credentials differ between clients; everything else is shared.
-write_mihomo_template() { # write_mihomo_template <outfile>
-    local outfile="$1"
-    cat > "$outfile" << EOF || return 1
-mixed-port: 7897
-allow-lan: true
-bind-address: "*"
-mode: rule
-log-level: info
-unified-delay: true
-ipv6: true
-profile:
-  store-selected: true
-  store-fake-ip: true
-dns:
-  enable: true
-  listen: "0.0.0.0:53"
-  ipv6: true
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  default-nameserver:
-    - 223.5.5.5
-    - 8.8.8.8
-  nameserver:
-    - https://dns.alidns.com/dns-query
-    - https://doh.pub/dns-query
-  fallback:
-    - https://1.0.0.1/dns-query
-    - tls://dns.google
-  fallback-filter:
-    geoip: true
-    geoip-code: CN
-    ipcidr:
-      - 240.0.0.0/4
-
-tun:
-  enable: true
-  stack: mixed
-  device: Mihomo
-  mtu: 1420
-  auto-route: true
-  auto-redirect: true
-  auto-detect-interface: true
-  dns-hijack:
-    - any:53
-    - tcp://any:53
-
-proxies:
-  - name: Reality
-    type: vless
-    server: $server_ip
-    port: $reality_port
-    uuid: $reality_uuid
-    network: tcp
-    udp: true
-    tls: true
-    flow: xtls-rprx-vision
-    servername: $reality_server_name
-    client-fingerprint: chrome
-    reality-opts:
-      public-key: $public_key
-      short-id: $short_id
-
-  - name: Hysteria2
-    type: hysteria2
-    server: $server_ip
-${hy_clash_port_yaml}
-    password: $hy_password
-    up: "300 Mbps"
-    down: "300 Mbps"
-    sni: $hy_server_name
-    skip-cert-verify: true
-    alpn:
-      - h3
-
-proxy-groups:
-  - name: 节点选择
-    type: select
-    proxies:
-      - Reality
-      - Hysteria2
-      - 自动选择
-      - DIRECT
-
-  - name: 自动选择
-    type: url-test
-    proxies:
-      - Reality
-      - Hysteria2
-    url: "http://www.gstatic.com/generate_204"
-    interval: 300
-    tolerance: 50
-
-
-rules:
-  - GEOIP,LAN,DIRECT
-  - GEOIP,CN,DIRECT
-  - MATCH,节点选择
-
-EOF
-    return 0
-}
-
-# Per-client derived configuration: /root/sbox/clients/<name>/mihomo.yaml
-# (directory 0700, file 0600). The YAML is DERIVED output only -- the server
-# config remains the single source of truth and the YAML can be regenerated.
-generate_client_configuration() { # generate_client_configuration <name>
-    local name="$1" cfg="$SB_SERVER_CONFIG" uuid password creds
-    local out_dir out_file
-    if ! validate_client_name "$name"; then
-        warning "客户端名称非法: '$name'"
-        return 1
-    fi
-    [ -f "$cfg" ] || { warning "服务端配置不存在: $cfg"; return 1; }
-    if ! audit_client_consistency "$cfg" >/dev/null; then
-        warning "客户端集合不一致，拒绝生成配置（先运行一致性检查）"
-        return 1
-    fi
-    if ! creds="$(get_client_credentials "$name" "$cfg")"; then
-        warning "客户端 '$name' 在 Reality/HY2 中不完整，无法生成配置"
-        return 1
-    fi
-    uuid="$(printf '%s\n' "$creds" | sed -n '1p')"
-    password="$(printf '%s\n' "$creds" | sed -n '2p')"
-    # write_mihomo_template reads these exact names from the caller scope
-    reality_uuid="$uuid"
-    hy_password="$password"
-
-    server_ip=$(grep -o "SERVER_IP='[^']*'" "$SB_STATE_FILE" 2>/dev/null | awk -F"'" '{print $2}')
-    public_key=$(grep -o "PUBLIC_KEY='[^']*'" "$SB_STATE_FILE" 2>/dev/null | awk -F"'" '{print $2}')
-    reality_port=$(jq -r --arg tag "$REALITY_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .listen_port' "$cfg")
-    reality_server_name=$(jq -r --arg tag "$REALITY_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .tls.server_name' "$cfg")
-    short_id=$(jq -r --arg tag "$REALITY_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .tls.reality.short_id[0]' "$cfg")
-    hy_port=$(jq -r --arg tag "$HY2_INBOUND_TAG" '.inbounds[] | select(.tag == $tag) | .listen_port' "$cfg")
-    hy_server_name=$(grep -o "HY_SERVER_NAME='[^']*'" "$SB_STATE_FILE" 2>/dev/null | awk -F"'" '{print $2}')
-    ishopping=$(grep '^HY_HOPPING=' "$SB_STATE_FILE" 2>/dev/null | cut -d'=' -f2)
-    hy_hopping_start=$(grep '^HY_HOPPING_START=' "$SB_STATE_FILE" 2>/dev/null | cut -d'=' -f2)
-    hy_hopping_end=$(grep '^HY_HOPPING_END=' "$SB_STATE_FILE" 2>/dev/null | cut -d'=' -f2)
-    hy_clash_port_yaml="    port: $hy_port"
-    formatted_range=""
-    if [ "$ishopping" = "TRUE" ] &&
-       [[ "$hy_hopping_start" =~ ^[0-9]+$ ]] &&
-       [[ "$hy_hopping_end" =~ ^[0-9]+$ ]]; then
-        formatted_range="${hy_hopping_start}-${hy_hopping_end}"
-        hy_clash_port_yaml="    port: $hy_port
-    ports: ${formatted_range}
-    hop-interval: 30"
-    fi
-
-    out_dir="$SB_CLIENTS_DIR/$name"
-    if ! mkdir -p "$out_dir"; then
-        warning "创建客户端目录失败: $out_dir"
-        return 1
-    fi
-    chmod 0700 "$out_dir"
-    out_file="$out_dir/mihomo.yaml"
-    if ! write_mihomo_template "$out_file"; then
-        warning "写入客户端配置失败: $out_file"
-        return 1
-    fi
-    chmod 0600 "$out_file"
-
-    info "客户端 '$name' 的 Mihomo 配置已生成: $out_file（使用 '$name' 自己的 UUID/password）"
-    info "Reality 链接: vless://$uuid@$server_ip:$reality_port?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$reality_server_name&fp=chrome&pbk=$public_key&sid=$short_id&type=tcp&headerType=none#REALITY-$name"
-    if [ -n "$formatted_range" ]; then
-        info "HY2 链接: hysteria2://$password@$server_ip:$hy_port?insecure=1&sni=$hy_server_name&mport=${hy_port},${formatted_range}#HY2-$name"
-    else
-        info "HY2 链接: hysteria2://$password@$server_ip:$hy_port?insecure=1&sni=$hy_server_name#HY2-$name"
-    fi
-}
-list_clients() { # 查看客户端（只读，不作为破坏性操作的门槛）
-    audit_client_consistency "$SB_SERVER_CONFIG"
-}
-
-add_client_interactive() {
-    local name
-    read -r -p "请输入客户端名称 (例如 vmix-01，字母/数字开头，仅字母数字._-，最长32): " name
-    add_client "$name"
-}
-
-generate_client_configuration_interactive() {
-    local name
-    audit_client_consistency "$SB_SERVER_CONFIG" || return 1
-    read -r -p "请输入要生成配置的客户端名称: " name
-    generate_client_configuration "$name"
-}
-
-delete_client_interactive() {
-    local name
-    read -r -p "请输入要删除的客户端名称: " name
-    delete_client "$name"
-}
-
-client_management_menu() {
-    while :; do
-        echo ""
-        show_notice "客户端管理"
-        info "1. 查看客户端"
-        info "2. 添加客户端"
-        info "3. 生成客户端配置"
-        info "4. 删除客户端"
-        info "5. 迁移旧客户端为 legacy"
-        info "6. 检查客户端一致性"
-        info "0. 返回"
-        echo ""
-        read -r -p "请输入对应数字（0-6）: " cm_choice
-        echo ""
-        case "$cm_choice" in
-            1) list_clients ;;
-            2) add_client_interactive ;;
-            3) generate_client_configuration_interactive ;;
-            4) delete_client_interactive ;;
-            5)
-                warning "迁移只会为没有 name 的旧用户补上 name=legacy，绝不更换 UUID/password。"
-                migrate_legacy_clients
-                ;;
-            6) audit_client_consistency "$SB_SERVER_CONFIG" ;;
-            0) break ;;
-            *) warning "无效的选项，请重新选择" ;;
-        esac
-    done
-}
-# <<< phase-c client-management <<< ============================================
-
-# >>> phase-d singbox-1.14-api >>> =============================================
-# Phase D: safe production upgrade to 1.14.x stable with a localhost-only
-# service.api (top-level "services" entry); the installer is a single
-# self-contained file, so all Phase D primitives live here.
-PHASE_D_TARGET_MAJOR="${PHASE_D_TARGET_MAJOR:-1}"
-PHASE_D_TARGET_MINOR="${PHASE_D_TARGET_MINOR:-14}"
-PHASE_D_MIN_VERSION="${PHASE_D_MIN_VERSION:-1.14.0}"
-PHASE_D_API_TAG="${PHASE_D_API_TAG:-monitor-api}"
-PHASE_D_API_LISTEN="${PHASE_D_API_LISTEN:-127.0.0.1}"
-PHASE_D_API_PORT="${PHASE_D_API_PORT:-9091}"
-SB_RELEASES_URL="https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100"
-
-# Selects the newest STABLE 1.14.x release tag from GitHub. Fail-closed:
-# drafts/prereleases, 1.13.x and 1.15.x are never accepted, and "latest" can
-# never drift the target across major/minor lines. Prints e.g. "v1.14.7".
-select_1_14_stable_tag() {
-    local releases
-    releases="$(curl -fsSL "$SB_RELEASES_URL" 2>/dev/null)" || {
-        warning "无法获取 sing-box releases 列表"
-        return 1
-    }
-    local tag
-    tag="$(printf '%s' "$releases" | phase_d_select_release_from_json 2>/dev/null | tr -d '\r')" || {
-        warning "GitHub releases 中没有可用的 stable v1.14.x（拒绝 1.13.x / 1.15.x / prerelease）"
-        return 1
-    }
-    [ -n "$tag" ] || {
-        warning "GitHub releases 中没有可用的 stable v1.14.x（拒绝 1.13.x / 1.15.x / prerelease）"
-        return 1
-    }
-    printf '%s\n' "$tag"
-}
-
-phase_d_version_in_target_series() { # <version-or-tag>
-    local version="${1#v}"
-    [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
-    [ "${BASH_REMATCH[1]}" = "$PHASE_D_TARGET_MAJOR" ] || return 1
-    [ "${BASH_REMATCH[2]}" = "$PHASE_D_TARGET_MINOR" ] || return 1
-    return 0
-}
-
-phase_d_version_at_least_min() { # <version-or-tag>
-    local version="${1#v}" minimum="${PHASE_D_MIN_VERSION#v}"
-    local v_major v_minor v_patch m_major m_minor m_patch
-    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-    [[ "$minimum" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-    IFS='.' read -r v_major v_minor v_patch <<< "$version"
-    IFS='.' read -r m_major m_minor m_patch <<< "$minimum"
-    (( 10#$v_major > 10#$m_major )) && return 0
-    (( 10#$v_major < 10#$m_major )) && return 1
-    (( 10#$v_minor > 10#$m_minor )) && return 0
-    (( 10#$v_minor < 10#$m_minor )) && return 1
-    (( 10#$v_patch >= 10#$m_patch ))
-}
-
-phase_d_release_tag_is_allowed() { # <tag>
-    local tag="$1"
-    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
-    phase_d_version_in_target_series "$tag" || return 1
-    phase_d_version_at_least_min "$tag"
-}
-
-# Pure release selector: reads the GitHub releases JSON array on stdin and
-# prints the newest stable v1.14.x tag.
-phase_d_select_release_from_json() {
-    local selected
-    selected="$(jq -er \
-        --argjson major "$PHASE_D_TARGET_MAJOR" \
-        --argjson minor "$PHASE_D_TARGET_MINOR" '
-          [ .[]
-            | select((.draft // false) == false)
-            | select((.prerelease // false) == false)
-            | .tag_name as $tag
-            | select($tag | type == "string")
-            | ($tag | capture("^v(?<major>[0-9]+)\\.(?<minor>[0-9]+)\\.(?<patch>[0-9]+)$")?) as $v
-            | select($v != null)
-            | select(($v.major | tonumber) == $major and ($v.minor | tonumber) == $minor)
-            | {
-                tag: $tag,
-                major: ($v.major | tonumber),
-                minor: ($v.minor | tonumber),
-                patch: ($v.patch | tonumber)
-              }
-          ]
-          | sort_by([.major, .minor, .patch])
-          | last
-          | .tag
-        ' 2>/dev/null)" || return 1
-    phase_d_release_tag_is_allowed "$selected" || return 1
-    printf '%s\n' "$selected"
-}
-
-# Structural audit of the top-level services state: services (if present) must
-# be an array; the monitor-api service must appear at most once with exactly
-# the compliant type/listen/port. Empty output = injectable or already exact.
-# Exit code also fail-closed.
-phase_d_config_structure_problems() { # <config>
-    local cfg="$1"
-    jq -r \
-      --arg tag "$PHASE_D_API_TAG" \
-      --arg listen "$PHASE_D_API_LISTEN" \
-      --argjson port "$PHASE_D_API_PORT" '
-      if type != "object" then
-        ["配置根节点不是 object"]
-      elif (has("services") and ((.services | type) != "array")) then
-        ["services 存在但不是数组"]
-      else
-        ((.services // []) | map(select(.tag == $tag))) as $m |
-        ([ ]
-          + (if ($m | length) > 1 then ["monitor-api service 数量大于 1"] else [] end)
-          + (if ($m | length) == 1 and ($m[0].type // "") != "api"
-             then ["monitor-api type 不是 api"] else [] end)
-          + (if ($m | length) == 1 and ($m[0].listen // "") != $listen
-             then ["monitor-api listen 不是 127.0.0.1"] else [] end)
-          + (if ($m | length) == 1 and ($m[0].listen_port // -1) != $port
-             then ["monitor-api listen_port 不是 9091"] else [] end)
-        )
-      end
-      | .[]
-    ' "$cfg" 2>/dev/null
-}
-
-# True when the config already carries exactly one compliant monitor-api
-# service entry (loopback-only, fixed port).
-phase_d_api_service_exact() { # <config>
-    local cfg="$1"
-    jq -e \
-      --arg tag "$PHASE_D_API_TAG" \
-      --arg listen "$PHASE_D_API_LISTEN" \
-      --argjson port "$PHASE_D_API_PORT" '
-        [(.services // [])[] | select(.tag == $tag)] as $m |
-        ($m | length) == 1 and
-        $m[0].type == "api" and
-        $m[0].listen == $listen and
-        $m[0].listen_port == $port
-      ' "$cfg" >/dev/null 2>&1
-}
-
-# Idempotent injection of the localhost-only service.api entry. Fails closed
-# when the input config fails the structural audit; re-audits the output.
-phase_d_inject_api_service() { # <input> <output>
-    local input="$1" output="$2" problems rc count tmp
-    problems="$(phase_d_config_structure_problems "$input")"; rc=$?
-    if [ "$rc" -ne 0 ]; then
-        warning "Phase D API 结构审计执行失败"
-        return 1
-    fi
-    if [ -n "$problems" ]; then
-        printf '%s\n' "$problems" >&2
-        return 1
-    fi
-
-    count="$(jq -er --arg tag "$PHASE_D_API_TAG" '[(.services // [])[] | select(.tag == $tag)] | length' "$input" 2>/dev/null | tr -d '\r')" || return 1
-    if [ "$count" -eq 1 ]; then
-        # Existing exact service passed the structural audit; preserve config.
-        cp -a -- "$input" "$output" || return 1
-        return 0
-    fi
-
-    tmp="${output}.tmp.$$"
-    rm -f -- "$tmp"
-    if ! jq \
-      --arg tag "$PHASE_D_API_TAG" \
-      --arg listen "$PHASE_D_API_LISTEN" \
-      --argjson port "$PHASE_D_API_PORT" '
-        .services = ((.services // []) + [{
-          "type": "api",
-          "tag": $tag,
-          "listen": $listen,
-          "listen_port": $port
-        }])
-      ' "$input" > "$tmp"; then
-        rm -f -- "$tmp"
-        return 1
-    fi
-    mv -f -- "$tmp" "$output" || { rm -f -- "$tmp"; return 1; }
-
-    problems="$(phase_d_config_structure_problems "$output")"; rc=$?
-    if [ "$rc" -ne 0 ] || [ -n "$problems" ]; then
-        rm -f -- "$output"
-        [ -n "$problems" ] && printf '%s\n' "$problems" >&2
-        return 1
-    fi
-    return 0
-}
-
-api_port_occupied() { # any current listener on the API port (v4 or v6)
-    ss -H -lntu 2>/dev/null | grep -qE "[:.]${PHASE_D_API_PORT}[[:space:]]"
-}
-
-# Downloads and verifies a candidate binary for <tag>, placing it at
-# <candidate_path> (which MUST live on the same filesystem as the live binary
-# so the later replacement is an atomic rename).
-acquire_candidate_binary() { # acquire_candidate_binary <tag> <version> <candidate_path>
-    local tag="$1" ver="$2" candidate="$3"
-    local arch package archive extract_dir
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64) arch="amd64" ;;
-        aarch64) arch="arm64" ;;
-        armv7l) arch="armv7" ;;
-    esac
-    package="sing-box-${ver}-linux-${arch}"
-    archive="$(mktemp "${SB_SING_BOX_BIN}.archive.XXXXXX")" || return 1
-    extract_dir="$(mktemp -d "${SB_SING_BOX_BIN}.extract.XXXXXX")" || {
-        rm -f "$archive"
-        return 1
-    }
-    if ! curl -4 -fL --progress-bar -o "$archive" \
-            "https://github.com/SagerNet/sing-box/releases/download/${tag}/${package}.tar.gz"; then
-        warning "下载 sing-box ${tag} 失败"
-        rm -rf "$archive" "$extract_dir"
-        return 1
-    fi
-    if ! tar -tzf "$archive" >/dev/null 2>&1; then
-        warning "下载包校验失败（非有效 tar.gz）"
-        rm -rf "$archive" "$extract_dir"
-        return 1
-    fi
-    if ! tar -xzf "$archive" -C "$extract_dir"; then
-        warning "解压 sing-box 失败"
-        rm -rf "$archive" "$extract_dir"
-        return 1
-    fi
-    if [ ! -f "$extract_dir/$package/sing-box" ]; then
-        warning "下载包内缺少 sing-box 二进制"
-        rm -rf "$archive" "$extract_dir"
-        return 1
-    fi
-    if ! install -m 0755 "$extract_dir/$package/sing-box" "$candidate"; then
-        warning "准备 candidate 二进制失败"
-        rm -rf "$archive" "$extract_dir"
-        return 1
-    fi
-    rm -rf "$archive" "$extract_dir"
-    return 0
-}
-
-verify_candidate_binary() { # verify_candidate_binary <candidate> <version>
-    local out
-    if ! out="$("$1" version 2>/dev/null)"; then
-        warning "candidate 二进制无法执行 version"
-        return 1
-    fi
-    if ! printf '%s' "$out" | grep -q "version $2"; then
-        warning "candidate 二进制版本不是 $2（$(printf '%s' "$out" | head -n 1)）"
-        return 1
-    fi
-    return 0
-}
-
-# Post-restart runtime verification. Expected version, service state, MainPID,
-# Reality TCP / HY2 UDP listeners, the loopback-only API listener (never
-# 0.0.0.0/[::]) and a live `sing-box api connection list` call.
-phase_d_health_ok() { # phase_d_health_ok <expected_version> [require_api=yes|no]
-    local expected="$1" require_api="${2:-yes}"
-    local main_pid reality_port hy_port out
-    if ! systemctl is-active --quiet sing-box 2>/dev/null; then
-        warning "健康检查失败: sing-box 服务未 active"
-        return 1
-    fi
-    main_pid="$(systemctl show sing-box -p MainPID --value 2>/dev/null)"
-    case "$main_pid" in
-        ''|*[!0-9]*) warning "健康检查失败: MainPID 无效（${main_pid:-空}）"; return 1 ;;
-    esac
-    [ "$main_pid" -gt 0 ] || { warning "健康检查失败: MainPID 无效（$main_pid）"; return 1; }
-    if ! out="$("$SB_SING_BOX_BIN" version 2>/dev/null)"; then
-        warning "健康检查失败: 当前二进制无法执行 version"
-        return 1
-    fi
-    if ! printf '%s' "$out" | grep -q "version $expected"; then
-        warning "健康检查失败: 当前二进制不是 $expected（$(printf '%s' "$out" | head -n 1)）"
-        return 1
-    fi
-    reality_port="$(jq -r --arg tag "$REALITY_INBOUND_TAG" \
-        '.inbounds[] | select(.tag == $tag) | .listen_port' "$SB_SERVER_CONFIG" 2>/dev/null)"
-    hy_port="$(jq -r --arg tag "$HY2_INBOUND_TAG" \
-        '.inbounds[] | select(.tag == $tag) | .listen_port' "$SB_SERVER_CONFIG" 2>/dev/null)"
-    if ! ss -H -lnt 2>/dev/null | grep -qE "[:.]${reality_port}[[:space:]]"; then
-        warning "健康检查失败: Reality TCP 监听缺失（$reality_port）"
-        return 1
-    fi
-    if ! ss -H -lnu 2>/dev/null | grep -qE "[:.]${hy_port}[[:space:]]"; then
-        warning "健康检查失败: HY2 UDP 监听缺失（$hy_port）"
-        return 1
-    fi
-    if [ "$require_api" = "yes" ]; then
-        if ! ss -H -lnt 2>/dev/null | grep -qE "127\.0\.0\.1:${PHASE_D_API_PORT}[[:space:]]"; then
-            warning "健康检查失败: API 127.0.0.1:${PHASE_D_API_PORT} 未监听"
-            return 1
-        fi
-        if ss -H -lnt 2>/dev/null | grep -qE "(0\.0\.0\.0|\[::\]):${PHASE_D_API_PORT}[[:space:]]"; then
-            warning "健康检查失败: API 监听越界（检测到 0.0.0.0/[::]:${PHASE_D_API_PORT}）"
-            return 1
-        fi
-        if ! "$SB_SING_BOX_BIN" api --url "http://127.0.0.1:${PHASE_D_API_PORT}" connection list >/dev/null 2>&1; then
-            warning "健康检查失败: sing-box api connection list 不可用"
-            return 1
-        fi
-    fi
-    return 0
-}
-
-hy2_hopping_enabled() {
-    [ "$(grep '^HY_HOPPING=' "$SB_STATE_FILE" 2>/dev/null | cut -d'=' -f2)" = "TRUE" ]
-}
-
-# Hopping rules must be restored after BOTH a successful upgrade and a rollback.
-ensure_hy2_hopping_after_restart() {
-    hy2_hopping_enabled || return 0
-    local service="${SB_HOPPING_SERVICE:-${HY_HOPPING_SERVICE:-/etc/systemd/system/sing-box-hy2-hopping.service}}"
-    if [ ! -f "$service" ]; then
-        warning "HY_HOPPING=TRUE 但缺少 $service；端口跳跃规则未刷新，请人工确认"
-        return 1
-    fi
-    if ! systemctl reload sing-box-hy2-hopping.service 2>/dev/null; then
-        warning "Hysteria2 端口跳跃规则刷新失败（sing-box-hy2-hopping.service）"
-        return 1
-    fi
-    return 0
-}
-
-# Double rollback: restores the old binary AND the old config, restarts, and
-# re-verifies. A failing rollback restart is reported as needing manual
-# intervention -- never as a successful recovery.
-_rollback_upgrade() { # _rollback_upgrade <backup_bin> <backup_cfg> <old_version>
-    local backup_bin="$1" backup_cfg="$2" old_version="$3"
-    local require_api="no"
-    warning "升级失败，执行双回滚（binary + config）..."
-    if ! cp -a "$backup_bin" "$SB_SING_BOX_BIN" || ! cp -a "$backup_cfg" "$SB_SERVER_CONFIG"; then
-        warning "回滚文件恢复失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-        return 1
-    fi
-    if ! systemctl restart sing-box 2>/dev/null; then
-        warning "回滚后 restart sing-box 失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-        return 1
-    fi
-    if phase_d_api_service_exact "$SB_SERVER_CONFIG"; then
-        require_api="yes"
-    fi
-    if ! phase_d_health_ok "$old_version" "$require_api"; then
-        warning "回滚后健康检查失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-        return 1
-    fi
-    if ! ensure_hy2_hopping_after_restart; then
-        warning "回滚后端口跳跃规则未能确认恢复，请人工检查"
-        return 1
-    fi
-    warning "已回滚到升级前状态（binary $old_version + config），服务健康"
-    return 0
-}
-
-upgrade_singbox_1_14() {
-    # A manual (non-systemd) sing-box process must block the upgrade BEFORE any
-    # binary/config change: Phase D only operates on a systemd-managed instance.
-    if pgrep -x sing-box >/dev/null 2>&1 && ! systemctl is-active --quiet sing-box 2>/dev/null; then
-        warning "检测到 sing-box 正由手工进程运行（非 systemd 管理），Phase D 拒绝修改 binary/config"
-        warning "请先安排维护窗口，将现有进程迁移到 sing-box.service 后再执行升级"
-        return 1
-    fi
-    with_client_lock _upgrade_singbox_1_14_locked
-}
-
-# The whole transaction runs under the SAME /root/sbox/config.lock as Phase C:
-# read -> audit -> candidate -> check -> backup -> replace -> restart -> health.
-_upgrade_singbox_1_14_locked() {
-    local problems api_problems tag ver old_version
-    local candidate_bin backup_bin backup_cfg candidate_cfg
-    [ -f "$SB_SERVER_CONFIG" ] || { warning "服务端配置不存在: $SB_SERVER_CONFIG"; return 1; }
-    if ! jq empty "$SB_SERVER_CONFIG" >/dev/null 2>&1; then
-        warning "服务端配置不是合法 JSON: $SB_SERVER_CONFIG"
-        return 1
-    fi
-
-    # Phase C precondition: the multi-client identity model must already be in
-    # place. Phase D NEVER auto-migrates an unnamed shared account.
-    if ! problems="$(candidate_problems "$SB_SERVER_CONFIG")"; then
-        warning "客户端结构审计执行失败: $SB_SERVER_CONFIG"
-        return 1
-    fi
-    if [ -n "$problems" ]; then
-        if grep -q '没有 name' <<<"$problems"; then
-            warning "检测到旧的无名共享账号（Phase C legacy migration 尚未执行），Phase D 不自动迁移"
-            warning "请先运行: mianyang → 10 客户端管理 → 5 迁移旧客户端为 legacy，然后再升级"
-        else
-            warning "客户端身份审计未通过（先在客户端管理中修复一致性）:"
-            while IFS= read -r p; do
-                [ -n "$p" ] && warning "  - $p"
-            done <<< "$problems"
-        fi
-        return 1
-    fi
-
-    # Existing API state must be either absent or fully compliant; anything
-    # else is fail-closed and never auto-overwritten.
-    if ! api_problems="$(phase_d_config_structure_problems "$SB_SERVER_CONFIG")"; then
-        warning "API 配置审计执行失败: $SB_SERVER_CONFIG"
-        return 1
-    fi
-    if [ -n "$api_problems" ]; then
-        warning "现有 API 配置不合规（拒绝自动覆盖）:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$api_problems"
-        return 1
-    fi
-
-    if ! phase_d_api_service_exact "$SB_SERVER_CONFIG" && api_port_occupied; then
-        warning "127.0.0.1:${PHASE_D_API_PORT} 已被占用，拒绝升级（即将新增 API 监听）"
-        return 1
-    fi
-
-    tag="$(select_1_14_stable_tag)" || return 1
-    ver="${tag#v}"
-    old_version="$("$SB_SING_BOX_BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-    [ -n "$old_version" ] || { warning "无法读取当前 sing-box 版本"; return 1; }
-
-    candidate_bin="$(mktemp "${SB_SING_BOX_BIN}.new.XXXXXX")" || {
-        warning "创建 candidate 二进制失败"
-        return 1
-    }
-    if ! acquire_candidate_binary "$tag" "$ver" "$candidate_bin"; then
-        rm -f "$candidate_bin"
-        return 1
-    fi
-    if ! verify_candidate_binary "$candidate_bin" "$ver"; then
-        rm -f "$candidate_bin"
-        return 1
-    fi
-
-    candidate_cfg="$(mktemp "${SB_SERVER_CONFIG}.candidate.XXXXXX")" || {
-        rm -f "$candidate_bin"
-        return 1
-    }
-    if phase_d_api_service_exact "$SB_SERVER_CONFIG"; then
-        cp -a "$SB_SERVER_CONFIG" "$candidate_cfg"
-    elif ! phase_d_inject_api_service "$SB_SERVER_CONFIG" "$candidate_cfg"; then
-        warning "生成 candidate config 失败"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-
-    if ! problems="$(candidate_problems "$candidate_cfg")"; then
-        warning "candidate 结构审计执行失败"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-    if [ -n "$problems" ]; then
-        warning "candidate 身份审计未通过:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$problems"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-    if ! api_problems="$(phase_d_config_structure_problems "$candidate_cfg")"; then
-        warning "candidate API 审计执行失败"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-    if [ -n "$api_problems" ] || ! phase_d_api_service_exact "$candidate_cfg"; then
-        warning "candidate API 配置验证失败:"
-        while IFS= read -r p; do
-            [ -n "$p" ] && warning "  - $p"
-        done <<< "$api_problems"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-
-    if ! "$candidate_bin" check -c "$candidate_cfg" >/dev/null 2>&1; then
-        warning "candidate binary check 未通过，正式环境未修改"
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    fi
-
-    backup_bin="$(mktemp "${SB_SING_BOX_BIN}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")" || {
-        rm -f "$candidate_bin" "$candidate_cfg"
-        return 1
-    }
-    backup_cfg="$(mktemp "${SB_SERVER_CONFIG}.bak.$(date +%Y%m%d-%H%M%S).XXXXXX")" || {
-        rm -f "$candidate_bin" "$candidate_cfg" "$backup_bin"
-        return 1
-    }
-    if ! cp -a "$SB_SING_BOX_BIN" "$backup_bin"; then
-        warning "备份当前 binary 失败，正式环境未修改"
-        rm -f "$candidate_bin" "$candidate_cfg" "$backup_bin" "$backup_cfg"
-        return 1
-    fi
-    if ! cp -a "$SB_SERVER_CONFIG" "$backup_cfg"; then
-        warning "备份当前配置失败，正式环境未修改"
-        rm -f "$candidate_bin" "$candidate_cfg" "$backup_bin" "$backup_cfg"
-        return 1
-    fi
-
-    if ! mv -f "$candidate_bin" "$SB_SING_BOX_BIN"; then
-        warning "原子替换 binary 失败，正式环境未修改"
-        rm -f "$candidate_bin" "$candidate_cfg" "$backup_bin" "$backup_cfg"
-        return 1
-    fi
-    if ! mv -f "$candidate_cfg" "$SB_SERVER_CONFIG"; then
-        # The binary at the live path is ALREADY the new one: this is a mixed
-        # state (new binary + old config). Restore BOTH -- config first, then
-        # binary -- then restart immediately and verify, so that no future
-        # restart ever runs the mixed pair. Backups are KEPT until the
-        # recovered state is proven healthy.
-        warning "原子替换 config 失败，执行双恢复（config → binary）..."
-        if ! cp -a "$backup_cfg" "$SB_SERVER_CONFIG"; then
-            warning "恢复 config 失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-            return 1
-        fi
-        if ! cp -a "$backup_bin" "$SB_SING_BOX_BIN"; then
-            warning "恢复 binary 失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-            return 1
-        fi
-        rm -f "$candidate_bin" "$candidate_cfg"
-        if ! systemctl restart sing-box 2>/dev/null; then
-            warning "双恢复后 restart sing-box 失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-            return 1
-        fi
-        local require_api="no"
-        if phase_d_api_service_exact "$SB_SERVER_CONFIG"; then require_api="yes"; fi
-        if ! phase_d_health_ok "$old_version" "$require_api"; then
-            warning "双恢复后健康检查失败，请立即人工介入！备份: $backup_bin / $backup_cfg"
-            return 1
-        fi
-        if ! ensure_hy2_hopping_after_restart; then
-            warning "双恢复后端口跳跃规则未能确认恢复，请人工检查"
-            return 1
-        fi
-        warning "已恢复到升级前状态（binary $old_version + config），服务健康"
-        info "升级前备份已保留: binary=$backup_bin config=$backup_cfg"
-        return 1
-    fi
-
-    if ! systemctl restart sing-box 2>/dev/null; then
-        _rollback_upgrade "$backup_bin" "$backup_cfg" "$old_version"
-        return 1
-    fi
-    if ! phase_d_health_ok "$ver" "yes"; then
-        _rollback_upgrade "$backup_bin" "$backup_cfg" "$old_version"
-        return 1
-    fi
-    if ! ensure_hy2_hopping_after_restart; then
-        _rollback_upgrade "$backup_bin" "$backup_cfg" "$old_version"
-        return 1
-    fi
-
-    info "升级完成: sing-box $ver（binary + config 已替换并验证健康）"
-    info "本机 service.api 已启用: http://${PHASE_D_API_LISTEN}:${PHASE_D_API_PORT}（仅回环监听）"
-    info "升级前备份: binary=$backup_bin config=$backup_cfg"
-    return 0
-}
-# <<< phase-d singbox-1.14-api <<< ============================================
 
 NETWORK_SYSCTL_FILE="/etc/sysctl.d/99-sing-box-network.conf"
 UDP_BUFFER_MIN_BYTES=16777216
@@ -2080,7 +925,7 @@ modify_singbox() {
     (.inbounds[] | select(.tag == "hy2-in") | .tls.certificate_path) |= $hy_cert |
     (.inbounds[] | select(.tag == "hy2-in") | .tls.key_path) |= $hy_key
     ' /root/sbox/sbconfig_server.json > /root/sbox/sbconfig_server.temp && mv /root/sbox/sbconfig_server.temp /root/sbox/sbconfig_server.json
-    
+
     sed -i "s/HY_SERVER_NAME='.*'/HY_SERVER_NAME='$hy_domain'/" /root/sbox/config
 
     reload_singbox
@@ -2129,18 +974,79 @@ uninstall_singbox() {
     warning "卸载完成"
 }
 
-update_singbox(){
-    # Phase D: production upgrades go through the full transaction
-    # (identity audit -> candidate binary+config -> check -> backup ->
-    # atomic replace -> restart -> health / double rollback). The old
-    # half-transaction (replace binary, then hope the restart works) is gone.
-    info "升级 sing-box（Phase D 事务: 1.14.x stable + 本机 service.api）..."
-    if ! upgrade_singbox_1_14; then
-        warning "升级未完成；正式环境保持可用状态（详见上方原因/回滚信息）"
-        return 1
-    fi
-    return 0
+restore_kernel_file() {
+    local candidate
+    candidate=$(mktemp "$SB_DIR/sing-box.restore.XXXXXX") || return 1
+    cp -p "$1" "$candidate" && mv -f -- "$candidate" "$SB_BIN" && return 0
+    rm -f -- "$candidate"
+    return 1
 }
+
+kernel_runtime_ok() {
+    local pid tcp udp reality_port hy_port
+    systemctl is-active --quiet sing-box || return 1
+    pid=$(systemctl show sing-box -p MainPID --value) || return 1
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    reality_port=$(jq -er '.inbounds[] | select(.tag == "vless-in") | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    hy_port=$(jq -er '.inbounds[] | select(.tag == "hy2-in") | .listen_port' "$SB_SERVER_CONFIG") || return 1
+    tcp=$(ss -H -lntp "sport = :$reality_port") || return 1
+    udp=$(ss -H -lnup "sport = :$hy_port") || return 1
+    [[ "$tcp" == *"pid=$pid,"* && "$udp" == *"pid=$pid,"* ]]
+}
+
+wait_kernel_runtime() {
+    local attempt
+    for ((attempt=0; attempt<10; attempt++)); do
+      kernel_runtime_ok && return 0
+      sleep 1
+    done
+    return 1
+}
+
+update_singbox() (
+    local backup before_hash after_hash current_version
+    systemctl is-active --quiet sing-box || {
+      warning "只更新正在运行的 systemd 服务；手工进程或停止的服务请先处理。"; return 1;
+    }
+    exec 9>>"$SB_DIR/config.lock" || return 1
+    flock -w 15 9 || { warning "配置锁等待超时"; return 1; }
+    "$SB_BIN" check -c "$SB_SERVER_CONFIG" || return 1
+    kernel_runtime_ok || { warning "现有监听检查失败，暂不更新。"; return 1; }
+    current_version=$("$SB_BIN" version | awk '/^sing-box version / {print $3}') || return 1
+    if [ "$current_version" = "${SING_BOX_VERSION_TAG#v}" ]; then
+      info "已经是 ${SING_BOX_VERSION_TAG#v}，未下载、未重启、未修改配置。"
+      return 0
+    fi
+    before_hash=$(sha256sum "$SB_SERVER_CONFIG") || return 1
+    backup=$(mktemp "$SB_DIR/sing-box.backup-$(date +%Y%m%d-%H%M%S).XXXXXX") || return 1
+    cp -p "$SB_BIN" "$backup" || return 1
+    info "旧内核备份: $backup"
+    if ! install_singbox; then
+      warning "下载或候选内核检查失败，现有服务未重启。"; return 1;
+    fi
+    after_hash=$(sha256sum "$SB_SERVER_CONFIG") || after_hash=unreadable
+    if [ "$before_hash" != "$after_hash" ]; then
+      restore_kernel_file "$backup" || { warning "恢复旧内核失败，请人工恢复: $backup"; return 1; }
+      warning "更新期间配置发生变化，已恢复旧内核，未重启。"; return 1;
+    fi
+    if systemctl restart sing-box && wait_kernel_runtime; then
+      if systemctl is-active --quiet sing-box-hy2-hopping.service; then
+        if ! systemctl reload sing-box-hy2-hopping.service; then
+          warning "内核已启动，端口跳跃刷新失败，请检查跳跃服务。"; return 1;
+        fi
+      fi
+      info "内核更新完成：${SING_BOX_VERSION_TAG#v}。现有 UUID、密钥、密码、端口和配置未修改。"
+      return 0
+    fi
+    warning "新版启动失败，正在恢复旧内核..."
+    restore_kernel_file "$backup" || { warning "恢复旧内核失败，请人工恢复: $backup"; return 1; }
+    if systemctl restart sing-box && wait_kernel_runtime; then
+      warning "已恢复旧内核并启动服务。"
+    else
+      warning "旧内核已恢复，但服务未能确认恢复，请人工检查。备份: $backup"
+    fi
+    return 1
+)
 
 generate_random_number() {
     # Generates an 8-digit random number
@@ -2240,7 +1146,7 @@ process_dokoko() {
         done
         jq --arg fport "$fport" --arg fip "$fip" '
             .inbounds += [
-                {   
+                {
                     "type": "direct",
                     "tag": "direct-in",
                     "listen": $fip,
@@ -2294,7 +1200,7 @@ process_ssko() {
         info "本机ip为: $server_ip"
         jq --arg sspwd "$sspwd" --arg fport "$fport" '
             .inbounds += [
-                {   
+                {
                     "type": "shadowsocks",
                     "tag": "ss-in",
                     "listen": "::",
@@ -2315,7 +1221,7 @@ process_singbox() {
     info "请选择选项："
     echo ""
     info "1. 检查配置并重启 sing-box"
-    info "2. 升级 sing-box 内核（Phase D: 1.14.x + 本机 service.api）"
+    info "2. 安全更新 sing-box 内核"
     info "3. 查看 systemd 服务状态"
     info "4. 查看实时日志（Ctrl+C 退出）"
     info "5. 查看服务端配置（包含密钥）"
@@ -2368,7 +1274,7 @@ process_hy2hopping(){
           ishopping=$(grep '^HY_HOPPING=' /root/sbox/config | cut -d'=' -f2)
           if [ "$ishopping" = "FALSE" ]; then
               warning "开始设置端口跳跃范围..."
-              enable_hy2hopping       
+              enable_hy2hopping
           else
               warning "端口跳跃已开启"
               echo ""
@@ -2630,6 +1536,8 @@ show_installation_markers() {
     fi
 }
 
+main() {
+[ "$(id -u)" -eq 0 ] || error "请在 VPS 的 root 会话中运行。"
 print_with_delay "Reality Hysteria2 二合一脚本" 0.03
 echo ""
 echo ""
@@ -2645,7 +1553,8 @@ if has_any_installation_marker; then
         error "请先备份并修复缺失文件，不会自动执行全新安装"
     fi
 
-    install_pkgs
+    install_pkgs || error "基础工具安装失败，已停止。"
+    install_shortcut || error "修复 Personal 管理入口失败。"
     echo ""
     info "sing-box-reality-hysteria2 已安装"
     show_status
@@ -2666,11 +1575,10 @@ if has_any_installation_marker; then
     echo ""
     info "8. 落地机任意门解锁（本机做解锁机）"
     info "9. 落地机 SS 解锁（本机做解锁机）"
-    info "10. 客户端管理（多设备身份 / legacy 迁移 / 一致性检查）"
     echo ""
     hint "========================="
     echo ""
-    read -r -p "请输入对应数字 (0-10): " choice
+    read -r -p "请输入对应数字 (0-9): " choice
 
     case $choice in
       1)
@@ -2688,11 +1596,11 @@ if has_any_installation_marker; then
           show_client_configuration
           exit 0
         ;;
-      3)  
+      3)
           show_client_configuration
           exit 0
-      ;;	
-      4)  
+      ;;
+      4)
           process_singbox
           exit 0
           ;;
@@ -2716,10 +1624,6 @@ if has_any_installation_marker; then
           process_ssko
           exit 0
           ;;
-      10)
-          client_management_menu
-          exit 0
-          ;;
       0)
           uninstall_singbox
 	        exit 0
@@ -2731,10 +1635,10 @@ if has_any_installation_marker; then
 	esac
 	fi
 
-install_pkgs
+install_pkgs || error "基础工具安装失败，已停止。"
 mkdir -p "/root/sbox/"
 
-install_singbox
+install_singbox || error "内核下载或验证失败，已停止。"
 echo ""
 echo ""
 
@@ -2827,7 +1731,6 @@ cat > /root/sbox/sbconfig_server.json << EOF
       "listen_port": $reality_port,
       "users": [
         {
-          "name": "legacy",
           "uuid": "$reality_uuid",
           "flow": "xtls-rprx-vision"
         }
@@ -2855,7 +1758,6 @@ cat > /root/sbox/sbconfig_server.json << EOF
         "down_mbps": 1000,
         "users": [
             {
-                "name": "legacy",
                 "password": "$hy_password"
             }
         ],
@@ -2867,14 +1769,6 @@ cat > /root/sbox/sbconfig_server.json << EOF
             "certificate_path": "/root/sbox/self-cert/cert.pem",
             "key_path": "/root/sbox/self-cert/private.key"
         }
-    }
-  ],
-  "services": [
-    {
-      "type": "api",
-      "tag": "monitor-api",
-      "listen": "127.0.0.1",
-      "listen_port": 9091
     }
   ],
     "outbounds": [
@@ -2911,12 +1805,16 @@ EOF
 
 if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
     hint "check config profile..."
-    systemctl daemon-reload
-    systemctl enable sing-box > /dev/null 2>&1
-    systemctl start sing-box
-    install_shortcut
+    systemctl daemon-reload || error "刷新 systemd 失败"
+    systemctl enable sing-box > /dev/null 2>&1 || error "设置开机启动失败"
+    systemctl start sing-box || error "启动失败，请查看 journalctl -u sing-box"
+    wait_kernel_runtime || error "监听检查失败，请查看 journalctl -u sing-box"
+    install_shortcut || error "写入 Personal 管理入口失败。"
     show_client_configuration
     warning "输入mianyang,即可打开菜单"
 else
     error "配置文件检查失败，启动失败!"
 fi
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

@@ -1,6 +1,8 @@
 # Reality + Hysteria2 二合一 sing-box — Personal
 
-个人用户使用的纯脚本版本：保留 Reality + Hysteria2、多客户端管理、Mihomo/Linux 网关与 sing-box 1.14.x 升级能力；**不包含服务端 Monitor、Dashboard、E3 或 Web 管理后台**。
+以 2026 年 8 月旧版的安装与菜单流程为基础，供个人自用。保留原来的 `mianyang` 菜单、节点显示、BBR、端口跳跃和中转功能；没有多用户管理、Monitor、Web 后台或 service.api 认证迁移，也不会安装 ACL/runuser 作为监控依赖。
+
+安装代码和管理入口只使用本 Personal 仓库。
 
 ## 1. 安装服务端
 
@@ -10,12 +12,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-
 
 作用：安装 Reality + Hysteria2 服务端、systemd 服务和 `mianyang` 管理命令。全新安装会自动启用并启动 `sing-box.service`，不使用手工进程。
 
+本版新安装和菜单更新的内核目标固定为官方正式版 **1.14.3**。下载后验证 GitHub 发布资源的 SHA256；不使用测试版，不自动跟随未来的大版本。
+
 默认带宽参数：
 
 - Hysteria2 服务端：`1000/1000 Mbps`
 - Hysteria2 客户端：`300/300 Mbps`
-
-服务端和生成的客户端配置默认不封锁目标 UDP 443（QUIC/HTTP3）。更新脚本不会自动删除已经部署的配置中的旧拒绝规则；已有部署需要备份配置、移除对应规则并通过配置检查后重新加载。
 
 服务端生成的客户端文件：
 
@@ -29,6 +31,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-
 ```bash
 mianyang
 ```
+
+重新执行上方安装命令时，完整的现有部署会进入原菜单，并修复 `mianyang` 下载入口；不会自动重装、更新内核或重启服务。旧服务器在修复入口前，`mianyang` 仍可能下载原仓库的最新脚本。
 
 作用：修改服务端配置、显示客户端配置、重启或更新 sing-box、启用 BBR、管理端口跳跃和中转规则。
 
@@ -56,12 +60,10 @@ mianyang
 作用：进入 `4. sing-box基础操作`。子菜单功能：
 
 1. 检查现有配置，成功后重启 systemd 服务；
-2. 安全升级到最新 stable 1.14.x：升级前执行身份/API/配置审计；binary + config 成对备份；重启后验证 Reality、HY2、localhost service.api；失败自动双回滚；
+2. 更新内核至官方正式版 1.14.3：验证下载摘要、检查现有配置、备份旧内核，重启后检查 Reality/HY2 监听，失败恢复旧内核；
 3. 查看 `sing-box.service` 是否正在运行；
 4. 持续查看实时日志，按 `Ctrl+C` 退出；
 5. 查看完整服务端配置，输出包含 UUID、密码和私钥，不要公开。
-
-`service.api` 仅监听 `127.0.0.1:9091`，不向公网开放。
 
 ```bash
 systemctl status sing-box --no-pager
@@ -95,6 +97,10 @@ systemctl restart sing-box
 
 作用：直接重启 systemd 管理的 sing-box。
 
+**仅更新内核不需要重新生成 YAML。** 更新不会修改 UUID、Reality 密钥、HY2 密码、SNI、端口或配置，也不新增 API；服务重启会断开现有连接，停播后再操作。已经配置的 API 或其他旧设置保持原样，不会自动移除。
+
+新安装和生成的 sing-box 客户端配置不带目标 UDP 443 拒绝规则。已有配置不自动改写；我们之前已移除的规则不会因菜单内核更新被加回。
+
 ## 4. 网络优化
 
 ```bash
@@ -125,7 +131,7 @@ mianyang
 
 1. 写入 `/tmp/mihomo_client.yaml`；
 2. 下载 `install-linux-gateway.sh`；
-3. 安装 Mihomo、启用 TUN 网关并可开放局域网 9090 MetaCubeXD UI。
+3. 安装 Mihomo、启用 TUN 网关并开放局域网 9090 UI。
 
 支持：Ubuntu 22.04/24.04、Debian 12、amd64/arm64、systemd、`/dev/net/tun`。
 
@@ -137,7 +143,7 @@ mianyang
 cat /etc/mihomo/ui-secret
 ```
 
-作用：查看 Linux Mihomo 网关的 9090 MetaCubeXD UI 密钥（不是服务端 Web 管理后台）。
+作用：查看 9090 Web UI 密钥。
 
 ```text
 http://<Linux网关IP>:9090/ui/
@@ -195,3 +201,27 @@ mihomo-gateway-installer --restore /var/backups/mihomo-gateway/<备份目录名>
 ```
 
 作用：恢复安装前的 Mihomo、systemd、DNS 和网络配置。
+
+## 9. VPS IP 质量检测
+
+在 VPS 的 root SSH 窗口执行；这是检测命令，不是安装步骤，不会由本脚本自动运行：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh) -4 -p
+```
+
+使用 [xykt/IPQuality](https://github.com/xykt/IPQuality)，只检测 IPv4并关闭在线报告。检测 IP 类型、风险评分、黑名单和 TikTok 等流媒体解锁。解锁结果不能证明 LIVE Studio 推流稳定。
+
+旧 README 中的原命令也保留，它打开 IP 质量检测菜单：
+
+```bash
+bash <(curl -fsSL https://Check.Place) -I
+```
+
+如果要测线路延迟、回程路由和速度，使用 [网络质量检测](https://github.com/xykt/NetQuality)：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/xykt/NetQuality/main/net.sh) -4 -p
+```
+
+测速会占用带宽，请停播后运行。
