@@ -94,4 +94,17 @@ if (
 ); then fail 'incomplete backup restored'; fi
 [[ "$(cat "$TMP/live-config")" == 'live config' && "$(cat "$TMP/live-binary")" == 'live binary' ]] || fail 'incomplete backup deleted live files'
 [[ ! -e "$TMP/gateway.calls" ]] || fail 'incomplete backup stopped live service'
+cp "$TMP/live-binary" "$TMP/gateway-backup/rootfs$TMP/live-binary"
+printf 'net.ipv4.ip_forward=0\n' > "$TMP/gateway-backup/network.state"
+(
+    source "$ROOT/install-linux-gateway.sh"
+    MANAGED_PATHS=("$TMP/live-config" "$TMP/live-binary")
+    CONFIG_DIR="$TMP/live-config" MIHOMO_BIN="$TMP/live-binary"
+    NETWORK_KEYS=(net.ipv4.ip_forward)
+    systemctl() { return 0; }
+    pgrep() { return 1; }
+    sysctl() { printf '%s\n' "$*" >> "$TMP/restored-network"; }
+    restore_backup "$TMP/gateway-backup"
+)
+grep -q '^-w net.ipv4.ip_forward=0$' "$TMP/restored-network" || fail 'runtime forwarding setting not restored'
 printf 'PASS: ports, config rollback, shared-rule deletion, menu exit, uninstall and incomplete gateway backup\n'
