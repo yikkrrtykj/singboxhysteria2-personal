@@ -38,6 +38,9 @@ MANAGED_PATHS=(
   "$INSTALLER_COPY"
 )
 
+NETWORK_KEYS=(net.ipv4.ip_forward net.ipv4.conf.all.src_valid_mark
+  net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.ipv6.conf.all.forwarding)
+
 info() {
   printf '\033[1;32m[信息]\033[0m %s\n' "$*"
 }
@@ -238,7 +241,7 @@ preflight_processes_and_ports() {
 }
 
 create_backup() {
-  local timestamp path destination index state
+  local timestamp path destination index state key value
   timestamp="$(date +%Y%m%d-%H%M%S)"
   install -d -m 0700 "$BACKUP_ROOT"
   BACKUP_DIR="$(mktemp -d "${BACKUP_ROOT}/${timestamp}.XXXXXX")"
@@ -264,6 +267,11 @@ create_backup() {
     printf 'resolved_active=%s\n' "$(systemctl is-active systemd-resolved.service 2>/dev/null || true)"
     printf 'created_at=%s\n' "$(date --iso-8601=seconds)"
   } > "${BACKUP_DIR}/state"
+  : > "$BACKUP_DIR/network.state"
+  for key in "${NETWORK_KEYS[@]}"; do
+    value="$(sysctl -n "$key" 2>/dev/null)" || continue
+    printf '%s=%s\n' "$key" "$value" >> "$BACKUP_DIR/network.state"
+  done
   info "备份完成: $BACKUP_DIR"
 }
 
@@ -284,13 +292,34 @@ state_value() {
 
 restore_backup() {
   local backup="$1"
-  local index path marker source service_active service_enabled resolved_active
+  local index path marker source service_active service_enabled resolved_active key value
 
   [[ -d "$backup/manifest" && -d "$backup/rootfs" && -f "$backup/state" ]] || \
     die "不是有效的 Mihomo 网关备份目录: $backup"
+  backup="$(readlink -f -- "$backup")"
+  case "$backup/" in
+    "$CONFIG_DIR/"*|"$SERVICE_OVERRIDE_DIR/"*) die "备份目录位于将被替换的目录内，未修改系统。" ;;
+  esac
+
+  # Complete the existing manifest/source checks before deleting any live
+  # files. A truncated backup must leave the current gateway intact.
+  for index in "${!MANAGED_PATHS[@]}"; do
+    [[ -f "${backup}/manifest/${index}" ]] || die "备份清单缺失: ${backup}/manifest/${index}"
+    marker="$(<"${backup}/manifest/${index}")"
+    path="${MANAGED_PATHS[$index]}"
+    source="${backup}/rootfs${path}"
+    if [[ "$marker" == "present" ]]; then
+      [[ -e "$source" || -L "$source" ]] || die "备份内容缺失: $source"
+    elif [[ "$marker" != "absent" ]]; then
+      die "备份清单损坏: ${backup}/manifest/${index}"
+    fi
+  done
 
   warn "正在从备份恢复: $backup"
   systemctl stop mihomo.service 2>/dev/null || true
+  if pgrep -x mihomo >/dev/null 2>&1; then
+    die "无法停止 Mihomo，未覆盖当前文件。"
+  fi
 
   for index in "${!MANAGED_PATHS[@]}"; do
     marker="$(<"${backup}/manifest/${index}")"
@@ -311,7 +340,17 @@ restore_backup() {
   if [[ "$resolved_active" == "active" ]]; then
     systemctl restart systemd-resolved.service
   fi
-  sysctl --system >/dev/null 2>&1 || true
+  if [[ -f "$backup/network.state" ]]; then
+    for key in "${NETWORK_KEYS[@]}"; do
+      value="$(awk -F= -v wanted="$key" '$1==wanted {print $2; exit}' "$backup/network.state")"
+      [[ -n "$value" ]] || continue
+      [[ "$value" =~ ^[0-9]+$ ]] || die "备份网络参数损坏: $key"
+      sysctl -w "$key=$value" >/dev/null
+    done
+  else
+    # Compatibility with backups created before runtime values were saved.
+    sysctl --system >/dev/null 2>&1 || true
+  fi
 
   service_enabled="$(state_value "$backup" service_enabled)"
   if [[ "$service_enabled" == "enabled" ]]; then
@@ -424,7 +463,7 @@ prepare_config_and_units() {
 
   check_dir="$WORK_DIR/config-check"
   install -d -m 0700 "$check_dir"
-  cp "$CONFIG_SOURCE" "$check_dir/config.yaml"
+  cp "$WORK_DIR/config.yaml" "$check_dir/config.yaml"
   cp "$WORK_DIR/geoip.metadb" "$check_dir/geoip.metadb"
   "$WORK_DIR/mihomo" -t -d "$check_dir"
 
@@ -600,4 +639,4 @@ main() {
   print_result
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
