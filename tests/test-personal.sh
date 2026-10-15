@@ -29,6 +29,47 @@ grep -q 'singboxhysteria2-personal/main/install.sh' "$SB_SHORTCUT_FILE" || fail 
 # shellcheck disable=SC2016
 grep -q 'bash "$task_script" "$@"' "$SB_SHORTCUT_FILE" || fail 'shortcut loses arguments'
 
+# Exercise the real network config writer against temporary files. No host
+# sysctl or kernel module changes are made by this regression.
+(
+    modprobe() { :; }
+    sysctl() {
+        if [[ "$1" == -p ]]; then
+            if grep -q '^net.ipv4.tcp_congestion_control = bbr$' "$2"; then CURRENT_CC=bbr; fi
+            return 0
+        fi
+        case "$2" in
+            net.ipv4.tcp_available_congestion_control) printf '%s\n' "$AVAILABLE_CC" ;;
+            net.ipv4.tcp_congestion_control) printf '%s\n' "$CURRENT_CC" ;;
+            net.core.default_qdisc) printf 'fq\n' ;;
+            net.core.rmem_max) printf '33554432\n' ;;
+            net.core.wmem_max) printf '212992\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    for task_network in supported unsupported already-enabled; do
+        NETWORK_SYSCTL_FILE="$TMP/network-$task_network.conf"
+        CURRENT_CC=cubic
+        AVAILABLE_CC='reno cubic bbr'
+        case "$task_network" in
+            unsupported) AVAILABLE_CC='reno cubic' ;;
+            already-enabled) CURRENT_CC=bbr ;;
+        esac
+        configure_install_network || fail "$task_network stopped installation"
+        grep -q '^net.core.rmem_max = 33554432$' "$NETWORK_SYSCTL_FILE" || fail 'reduced existing buffer'
+        grep -q '^net.core.wmem_max = 16777216$' "$NETWORK_SYSCTL_FILE" || fail 'missing UDP buffer tuning'
+        if [[ "$task_network" == unsupported ]]; then
+            [[ "$CURRENT_CC" == cubic ]] || fail 'unsupported BBR changed TCP algorithm'
+            ! grep -q 'tcp_congestion_control\|default_qdisc' "$NETWORK_SYSCTL_FILE" || fail 'unsupported BBR persisted'
+        else
+            [[ "$CURRENT_CC" == bbr ]] || fail 'BBR not enabled'
+            grep -q '^net.core.default_qdisc = fq$' "$NETWORK_SYSCTL_FILE" || fail 'missing fq default'
+        fi
+    done
+)
+grep -q '^configure_install_network$' "$ROOT/install.sh" || fail 'fresh install does not configure BBR'
+printf 'PASS: automatic BBR, unsupported-kernel fallback and existing-BBR preservation\n'
+
 # Core update must preserve config byte-for-byte, reject bad candidates, and
 # recover a running old kernel when the new kernel cannot start.
 mkdir "$TMP/updates"

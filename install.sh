@@ -831,7 +831,7 @@ write_network_sysctl() {
         request_bbr="TRUE"
     fi
 
-    mkdir -p /etc/sysctl.d
+    mkdir -p "$(dirname "$NETWORK_SYSCTL_FILE")"
     temp_file=$(mktemp) || error "无法创建网络优化临时文件"
     {
         echo "# Managed by install-singboxhysteria2"
@@ -877,6 +877,12 @@ enable_bbr() {
         configure_udp_buffers
         return 1
     fi
+}
+
+configure_install_network() {
+    # Only the fresh-install path calls this. Unsupported BBR is non-fatal;
+    # enable_bbr has already kept the TCP algorithm and tuned UDP buffers.
+    enable_bbr || info "已保留当前 TCP 算法，继续安装 sing-box。"
 }
 
 modify_singbox() {
@@ -1786,7 +1792,7 @@ cat > /root/sbox/sbconfig_server.json << EOF
 }
 EOF
 
-configure_udp_buffers
+configure_install_network
 
 cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
