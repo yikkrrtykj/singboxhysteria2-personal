@@ -1125,10 +1125,10 @@ kernel_runtime_ok() {
     while IFS=$'\t' read -r kind port network; do
         case "$kind" in vless) network=tcp ;; hysteria2) network=udp ;; direct|shadowsocks) ;; *) continue ;; esac
         if [ "$network" != udp ]; then
-            grep -E "[:.]$port[[:space:]]" <<< "$tcp" | grep -q "pid=$pid," || return 1
+            grep -E "[:.]${port}[[:space:]]" <<< "$tcp" | grep -q "pid=$pid," || return 1
         fi
         if [ "$network" != tcp ]; then
-            grep -E "[:.]$port[[:space:]]" <<< "$udp" | grep -q "pid=$pid," || return 1
+            grep -E "[:.]${port}[[:space:]]" <<< "$udp" | grep -q "pid=$pid," || return 1
         fi
     done <<< "$listeners"
 }
@@ -1324,12 +1324,12 @@ process_singbox() {
             # 检查配置
             if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
               info "检查配置文件，启动服务..."
-              restart_singbox || warning "sing-box 未重启，请查看上方提示"
+              restart_singbox || return 1
             fi
             break
             ;;
         2)
-            update_singbox
+            update_singbox || return 1
             break
             ;;
         3)
@@ -1363,7 +1363,8 @@ process_hy2hopping(){
           ishopping=$(grep '^HY_HOPPING=' /root/sbox/config | cut -d'=' -f2)
           if [ "$ishopping" = "FALSE" ]; then
               warning "开始设置端口跳跃范围..."
-              enable_hy2hopping
+              enable_hy2hopping || return 1
+              return 0
           else
               warning "端口跳跃已开启"
               echo ""
@@ -1700,7 +1701,7 @@ if has_any_installation_marker; then
           ;;
       6)
           process_hy2hopping
-          exit 0
+          exit $?
           ;;
       7)
           process_doko
