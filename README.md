@@ -14,10 +14,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-
 
 本版新安装和菜单更新的内核目标固定为官方正式版 **1.14.3**。下载后验证 GitHub 发布资源的 SHA256；不使用测试版，不自动跟随未来的大版本。
 
-默认带宽参数：
+Hysteria2 新安装默认使用 **BBR 拥塞控制**：服务端启用 `ignore_client_bandwidth: true`，服务端和生成的 sing-box / Mihomo 客户端不再设置固定上下行带宽。
 
-- Hysteria2 服务端：`1000/1000 Mbps`
-- Hysteria2 客户端：`300/300 Mbps`
+BBR 不保证零丢包，也不是公网带宽限速或流量配额控制。需要硬限速或额度时应使用独立机制，不能把 HY2 带宽声明当作硬限速。GitHub 脚本更新不会自动修改旧服务器配置。兼容性、测试范围和手动备份/迁移/回滚步骤见 [HY2 BBR 说明](docs/hysteria2-bbr.md)。
 
 服务端生成的客户端文件：
 
@@ -84,10 +83,10 @@ jq '.inbounds[] | {tag, listen_port}' /root/sbox/sbconfig_server.json
 作用：查看 Reality 和 Hysteria2 监听端口。
 
 ```bash
-jq '.inbounds[] | select(.tag == "hy2-in") | {up_mbps, down_mbps}' /root/sbox/sbconfig_server.json
+jq '.inbounds[] | select(.tag == "hy2-in") | {ignore_client_bandwidth, has_up_mbps:has("up_mbps"), has_down_mbps:has("down_mbps")}' /root/sbox/sbconfig_server.json
 ```
 
-作用：查看 Hysteria2 服务端带宽参数。
+作用：检查 HY2 协商设置及带宽字段是否存在；旧部署可能仍保留旧带宽声明。
 
 确认状态显示“启动方式: systemd”后，也可以直接执行：
 

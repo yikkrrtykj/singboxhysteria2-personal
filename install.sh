@@ -431,8 +431,6 @@ proxies:
     server: $server_ip
 ${hy_clash_port_yaml}
     password: $hy_password
-    up: "300 Mbps"
-    down: "300 Mbps"
     sni: $hy_server_name
     skip-cert-verify: true
     alpn:
@@ -618,8 +616,6 @@ cat > "$client_config_path" << EOF || error "保存 sing-box 客户端配置失�
             "server": "$server_ip",
 ${hy_server_port_json}
             "tag": "sing-box-hysteria2",
-            "up_mbps": 300,
-            "down_mbps": 300,
             "password": "$hy_password",
             "tls": {
                 "enabled": true,
@@ -1851,8 +1847,7 @@ cat > /root/sbox/sbconfig_server.json << EOF
         "tag": "hy2-in",
         "listen": "::",
         "listen_port": $hy_port,
-        "up_mbps": 1000,
-        "down_mbps": 1000,
+        "ignore_client_bandwidth": true,
         "users": [
             {
                 "password": "$hy_password"
