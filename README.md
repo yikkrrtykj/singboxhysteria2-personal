@@ -232,3 +232,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/xykt/NetQuality/main/net.sh)
 ```
 
 测速会占用带宽，请停播后运行。
+
+## 10. 大陆三网连通快检
+
+只想快速看当前 VPS 到大陆代表点是否能建立连接时，在 VPS 的 Bash 终端执行一行：
+
+```bash
+bash <(curl -fsSL --connect-timeout 5 --max-time 15 https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/5814e92d52767ff84736ddf14450e3c5f7d8f848/check-mainland.sh)
+```
+
+这是固定到已验证源码提交的独立脚本入口，无需更新安装器、不需要 root，不安装依赖或服务，不修改已有配置。需要系统已有 Bash 和 curl。
+
+北京、上海、广东的电信/联通/移动共 9 个代表测试点并行检查，单个请求最多 3 秒；只判断 IPv4 TCP 80 握手是否成功，不跑测速、回程路由或 IP 风险检测。测试点命名和端口来源为 [xykt/NetQuality](https://github.com/xykt/NetQuality/blob/main/net.sh)。
+
+“未确认”可能是 DNS、目标服务或路径问题，不能直接判断整个运营商或 VPS 被屏蔽；结果只代表这些点和当前时刻。该方向是 **VPS → 大陆**，不证明大陆用户能连入 VPS 的代理端口，也不验证 Hysteria2 UDP、持续丢包或长期稳定性。
