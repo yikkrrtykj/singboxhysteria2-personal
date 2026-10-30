@@ -16,8 +16,10 @@ jobs:
         run: |
           bash -n install.sh
           bash -n install-linux-gateway.sh
+          bash -n check-mainland.sh
           shellcheck -S error install.sh
           shellcheck -S error install-linux-gateway.sh
+          shellcheck check-mainland.sh
           shellcheck tests/test-personal.sh
           shellcheck tests/test-logic.sh
       - name: Installer regression and real configuration checks
