@@ -1,6 +1,6 @@
 # Reality + Hysteria2 二合一 sing-box — Personal
 
-以 2026 年 8 月旧版的安装与菜单流程为基础，供个人自用。保留原来的 `mianyang` 菜单、节点显示、BBR、端口跳跃和中转功能；没有多用户管理、Monitor、Web 后台或 service.api 认证迁移，也不会安装 ACL/runuser 作为监控依赖。
+以 2026 年 8 月旧版的安装与菜单流程为基础，供个人自用。使用独立的 `xun` 命令，保留节点显示、BBR、端口跳跃和中转功能；没有多用户管理、Monitor、Web 后台或 service.api 认证迁移，也不会安装 ACL/runuser 作为监控依赖。
 
 安装代码和管理入口只使用本 Personal 仓库。
 
@@ -10,7 +10,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh)
 ```
 
-作用：安装 Reality + Hysteria2 服务端、systemd 服务和 `mianyang` 管理命令。全新安装会自动启用并启动 `sing-box.service`，不使用手工进程。
+作用：安装 Reality + Hysteria2 服务端、systemd 服务和 `xun` 管理命令。全新安装会自动启用并启动 `sing-box.service`，不使用手工进程。
 
 本版新安装和菜单更新的内核目标固定为官方正式版 **1.14.3**。下载后验证 GitHub 发布资源的 SHA256；不使用测试版，不自动跟随未来的大版本。
 
@@ -28,10 +28,12 @@ BBR 不保证零丢包，也不是公网带宽限速或流量配额控制。需�
 ## 2. 打开管理菜单
 
 ```bash
-mianyang
+xun
 ```
 
-重新执行上方安装命令时，完整的现有部署会进入原菜单，并修复 `mianyang` 下载入口；不会自动重装、更新内核或重启服务。旧服务器在修复入口前，`mianyang` 仍可能下载原仓库的最新脚本。
+重新执行上方安装命令时，完整的现有部署会进入 Personal 菜单，并创建或修复 `xun` 入口；不会自动重装、更新内核或重启服务。入口文件为 `/root/sbox/xun.sh`，命令链接为 `/usr/bin/xun`，每次运行仍从本 Personal 仓库下载管理脚本。
+
+旧 Personal 部署迁移时，仅在 `/root/sbox/mianyang.sh` 含有已知 Personal 下载地址，且 `/usr/bin/mianyang` 是指向它的标准链接时，自动清理旧入口；旧链接不存在时也会清理该 Personal 入口文件。原版或自定义的 `mianyang` 命令会保留，无法确认的入口需手动核对。另一仓库使用 `miaomiao`，个人版使用 `xun`。两版仍共享配置目录和 systemd 服务，改名不代表支持在同一台服务器并行部署。
 
 作用：修改服务端配置、显示客户端配置、重启或更新 sing-box、启用 BBR、管理端口跳跃和中转规则。
 
@@ -53,7 +55,7 @@ mianyang
 作用：检查服务端配置，成功后才能重启。
 
 ```bash
-mianyang
+xun
 ```
 
 作用：进入 `4. sing-box基础操作`。子菜单功能：
@@ -111,7 +113,7 @@ systemctl restart sing-box
 已有部署只打开菜单或更新 sing-box 内核时，不会自动调整网络设置。需要手动启用时执行：
 
 ```bash
-mianyang
+xun
 ```
 
 作用：选择菜单 5，启用内核支持的 BBR 和 `fq`，并把 Hysteria2/QUIC UDP 收发缓冲上限提高到至少 16 MiB。配置保存在 `/etc/sysctl.d/99-sing-box-network.conf`，不依赖第三方优化脚本，也不需要更新客户端配置。
@@ -119,7 +121,7 @@ mianyang
 ## 5. Windows 客户端
 
 ```bash
-mianyang
+xun
 ```
 
 作用：选择菜单 3，把显示的 Mihomo/Clash Meta YAML 导入 Windows 客户端。默认选择 Reality，也可以切换到 Hysteria2。
@@ -129,7 +131,7 @@ mianyang
 先在服务端执行：
 
 ```bash
-mianyang
+xun
 ```
 
 作用：选择菜单 3，在输出末尾取得当前节点专用的 Linux 客户端命令。

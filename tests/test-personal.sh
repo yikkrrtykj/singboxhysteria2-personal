@@ -9,6 +9,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 # shellcheck source=../install.sh
 source "$ROOT/install.sh"
+bash "$ROOT/tests/test-shortcuts.sh"
+if command -v shellcheck >/dev/null 2>&1; then shellcheck "$ROOT/tests/test-shortcuts.sh"; fi
 info() { printf '%s\n' "$*"; }
 warning() { printf '%s\n' "$*"; }
 hint() { printf '%s\n' "$*"; }
@@ -22,7 +24,8 @@ if grep -q 'https://raw.githubusercontent.com/yikkrrtykj/install-singboxhysteria
     fail 'manager or gateway downloads upstream'
 fi
 if grep -q '"port": 443' "$ROOT/install.sh"; then fail 'UDP 443 policy returned'; fi
-SB_SHORTCUT_FILE="$TMP/manager" SB_SHORTCUT_LINK="$TMP/mianyang"
+SB_SHORTCUT_FILE="$TMP/manager" SB_SHORTCUT_LINK="$TMP/xun"
+SB_LEGACY_SHORTCUT_FILE="$TMP/legacy-manager" SB_LEGACY_SHORTCUT_LINK="$TMP/mianyang"
 install_shortcut
 bash -n "$SB_SHORTCUT_FILE"
 grep -q 'singboxhysteria2-personal/main/install.sh' "$SB_SHORTCUT_FILE" || fail 'wrong shortcut source'

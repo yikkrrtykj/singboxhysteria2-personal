@@ -19,8 +19,10 @@ SB_DIR="/root/sbox"
 SB_SERVER_CONFIG="$SB_DIR/sbconfig_server.json"
 SB_STATE_FILE="$SB_DIR/config"
 SB_BIN="$SB_DIR/sing-box"
-SB_SHORTCUT_FILE="$SB_DIR/mianyang.sh"
-SB_SHORTCUT_LINK="/usr/bin/mianyang"
+SB_SHORTCUT_FILE="$SB_DIR/xun.sh"
+SB_SHORTCUT_LINK="/usr/bin/xun"
+SB_LEGACY_SHORTCUT_FILE="$SB_DIR/mianyang.sh"
+SB_LEGACY_SHORTCUT_LINK="/usr/bin/mianyang"
 
 version_at_least() {
     local version="${1#v}"
@@ -137,6 +139,22 @@ install_pkgs() {
   done
 }
 
+remove_legacy_personal_shortcut() {
+  # Only retire the known Personal downloader, never an original/custom entry.
+  if [ -f "$SB_LEGACY_SHORTCUT_FILE" ] && [ ! -L "$SB_LEGACY_SHORTCUT_FILE" ] &&
+     grep -Fq '"https://raw.githubusercontent.com/yikkrrtykj/singboxhysteria2-personal/main/install.sh"' "$SB_LEGACY_SHORTCUT_FILE"; then
+    if [ -L "$SB_LEGACY_SHORTCUT_LINK" ] &&
+       [ "$(readlink "$SB_LEGACY_SHORTCUT_LINK")" = "$SB_LEGACY_SHORTCUT_FILE" ]; then
+      rm -f -- "$SB_LEGACY_SHORTCUT_LINK" || return 1
+    elif [ -e "$SB_LEGACY_SHORTCUT_LINK" ] || [ -L "$SB_LEGACY_SHORTCUT_LINK" ]; then
+      warning "旧 mianyang 入口不是标准 Personal 链接，已保留，请手动核对。"
+      return 0
+    fi
+    rm -f -- "$SB_LEGACY_SHORTCUT_FILE" || return 1
+    info "Personal 管理命令已改为 xun。"
+  fi
+}
+
 install_shortcut() {
   cat > "$SB_SHORTCUT_FILE" << EOF
 #!/usr/bin/env bash
@@ -149,6 +167,7 @@ bash "\$task_script" "\$@"
 EOF
   chmod 0700 "$SB_SHORTCUT_FILE" || return 1
   ln -sf "$SB_SHORTCUT_FILE" "$SB_SHORTCUT_LINK" || return 1
+  remove_legacy_personal_shortcut || return 1
 }
 
 reload_singbox() {
@@ -1054,7 +1073,7 @@ modify_singbox() {
 }
 
 backup_current_installation() {
-    local backup_dir backup_name unit_path
+    local backup_dir backup_name unit_path shortcut
 
     backup_name="sbox-backup-$(date +%Y%m%d-%H%M%S)"
     backup_dir="/root/${backup_name}"
@@ -1067,9 +1086,11 @@ backup_current_installation() {
     elif [ -e /etc/systemd/system/sing-box.service ]; then
         cp -a /etc/systemd/system/sing-box.service "$backup_dir/sing-box.service.source"
     fi
-    if [ -e /usr/bin/mianyang ] || [ -L /usr/bin/mianyang ]; then
-        cp -a --no-dereference /usr/bin/mianyang "$backup_dir/usr-bin-mianyang"
-    fi
+    for shortcut in "$SB_SHORTCUT_LINK" "$SB_LEGACY_SHORTCUT_LINK"; do
+        if [ -e "$shortcut" ] || [ -L "$shortcut" ]; then
+            cp -a --no-dereference "$shortcut" "$backup_dir/usr-bin-${shortcut##*/}" || return 1
+        fi
+    done
     systemctl cat sing-box > "$backup_dir/sing-box.unit.txt" 2>&1 || true
     systemctl show sing-box -p LoadState -p ActiveState -p FragmentPath -p MainPID > "$backup_dir/sing-box.state.txt" 2>&1 || true
     ps -ef | grep '[s]ing-box' > "$backup_dir/sing-box.process.txt" 2>&1 || true
@@ -1094,8 +1115,10 @@ uninstall_singbox() {
     disable_hy2hopping || return 1
     systemctl disable sing-box >/dev/null 2>&1 || return 1
     rm -f /etc/systemd/system/sing-box.service
-    rm -f /root/sbox/sbconfig_server.json /root/sbox/sing-box /root/sbox/mianyang.sh
-    rm -f /usr/bin/mianyang /root/sbox/self-cert/private.key /root/sbox/self-cert/cert.pem /root/sbox/config
+    remove_legacy_personal_shortcut || return 1
+    rm -f -- "$SB_SHORTCUT_FILE" "$SB_SHORTCUT_LINK"
+    rm -f /root/sbox/sbconfig_server.json /root/sbox/sing-box
+    rm -f /root/sbox/self-cert/private.key /root/sbox/self-cert/cert.pem /root/sbox/config
     rm -rf /root/sbox/self-cert/ /root/sbox/
     systemctl daemon-reload || return 1
     warning "卸载完成"
@@ -1569,6 +1592,8 @@ INSTALLATION_MARKERS=(
     /root/sbox/config
     /root/sbox/mianyang.sh
     /usr/bin/mianyang
+    /root/sbox/xun.sh
+    /usr/bin/xun
     /root/sbox/sing-box
     /etc/systemd/system/sing-box.service
     /lib/systemd/system/sing-box.service
@@ -1598,10 +1623,11 @@ show_installation_markers() {
         fi
     done
 
-    if [ -x /root/sbox/mianyang.sh ] && { [ -e /usr/bin/mianyang ] || [ -L /usr/bin/mianyang ]; }; then
-        info "管理命令: /usr/bin/mianyang"
+    if [ -x "$SB_SHORTCUT_FILE" ] && [ -L "$SB_SHORTCUT_LINK" ] &&
+       [ "$(readlink "$SB_SHORTCUT_LINK")" = "$SB_SHORTCUT_FILE" ]; then
+        info "Personal 管理命令: $SB_SHORTCUT_LINK"
     else
-        warning "管理命令不完整: /usr/bin/mianyang"
+        warning "Personal 管理命令不完整: $SB_SHORTCUT_LINK"
     fi
 
     service_unit=$(systemctl show sing-box -p FragmentPath --value 2>/dev/null || true)
@@ -1625,7 +1651,7 @@ show_installation_markers() {
 
 main() {
 [ "$(id -u)" -eq 0 ] || error "请在 VPS 的 root 会话中运行。"
-print_with_delay "Reality Hysteria2 二合一脚本" 0.03
+print_with_delay "Reality Hysteria2 二合一脚本 — Personal 个人版（xun）" 0.03
 echo ""
 echo ""
 
@@ -1903,7 +1929,7 @@ if /root/sbox/sing-box check -c /root/sbox/sbconfig_server.json; then
     wait_kernel_runtime || error "监听检查失败，请查看 journalctl -u sing-box"
     install_shortcut || error "写入 Personal 管理入口失败。"
     show_client_configuration
-    warning "输入mianyang,即可打开菜单"
+    warning "输入 xun，即可打开 Personal 个人版菜单"
 else
     error "配置文件检查失败，启动失败!"
 fi
